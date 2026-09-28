@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Session notes: `notes.*` settings — `notes.enabled` gates the tool, `notes.timestamps` stamps each note with its last-update date, and injection is four independent triggers: `notes.injectAfterCompaction` (on by default), `notes.injectOnTurns` + `notes.injectCadence`, `notes.injectAtTokenThreshold` + `notes.injectTokenThreshold`, and `notes.injectAtWindowPercent` + `notes.injectWindowPercent`. `notes.autoUpdate`/`notes.autoUpdateCadence` nudge the model to update notes as the last action of a turn. `notes.clearOnClear` (default off) makes `/clear` also wipe the session notes journal.
+- `/notes` command: prints session notes (with dates), injects the reference into the next request, or searches note keys/contents by text and regex (`notes.searchModel`, default `smol`, adds model-assisted matches). `show`, `inject`, `both`, and `search` subcommands; `inject` queues the reference without printing the notes — it always arms, regardless of injection settings.
+
+### Changed
+
+- Session notes storage is event-sourced: each `set`/`delete` appends one small event entry instead of rewriting the full snapshot, with a fresh snapshot every 32 events; notes carry `updatedAt` dates (the size budget still counts key+text only).
+- The saved-notes reference is no longer injected on every request — it ships at session start/resume, after compaction, or through the independent cadence/threshold/window triggers, or via `/notes`, and it is attached as a developer-role harness injection instead of a user turn.
+- A turn-cadence nudge (`notes.autoUpdate`, default on, every `notes.autoUpdateCadence` = 10 turns) reminds the model to update its notes as the last action of a turn.
+
 ## [18.4.3] - 2026-09-22
 
 ### Added

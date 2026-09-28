@@ -67,6 +67,7 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		description: command.description,
 		icon: command.icon,
 		subcommands: command.subcommands,
+		argumentCompletions: command.argumentCompletions,
 		inlineHint: command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
 	}),
@@ -91,6 +92,9 @@ function materializeTuiBuiltinSlashCommand(
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	} else if (cmd.inlineHint) {
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+	}
+	if (runtime && cmd.argumentCompletions) {
+		materialized.getArgumentCompletions = cmd.argumentCompletions(runtime);
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
 		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);

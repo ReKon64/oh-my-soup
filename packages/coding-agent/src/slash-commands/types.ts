@@ -1,5 +1,6 @@
 import type { Settings } from "../config/settings";
 import type { SlashCommandIconName } from "@oh-my-soup/pi-tui/theme/symbols";
+import type { AutocompleteItem } from "@oh-my-soup/pi-tui";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";
@@ -23,6 +24,8 @@ export interface BuiltinSlashCommand {
 	allowArgs?: boolean;
 	/** Subcommands for dropdown completion (e.g. /mcp add, /mcp list). */
 	subcommands?: SubcommandDef[];
+	/** Runtime-scoped argument completions; overrides the declarative `subcommands` completion (e.g. live session state: note keys, model thinking levels). */
+	argumentCompletions?: (runtime: TuiSlashCommandRuntime) => ((prefix: string) => AutocompleteItem[] | null);
 	/** Static inline hint when command takes a simple argument (no subcommands). */
 	inlineHint?: string;
 	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
@@ -58,6 +61,12 @@ export type SlashCommandResult = undefined | { consumed: true; agentInvoked?: bo
  * state (editor, selectors, status line).
  */
 export interface SlashCommandRuntime {
+	/**
+	 * The interactive TUI context. Present on the TUI runtime; the ACP
+	 * dispatcher passes this shape too and implementations MUST NOT depend on
+	 * TUI-only state (editor, selectors, status line) without guarding.
+	 */
+	ctx?: InteractiveModeContext;
 	session: AgentSession;
 	sessionManager: SessionManager;
 	settings: Settings;
@@ -147,11 +156,11 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 	 * `noConfusingVoidType` also rejects).
 	 */
 	handle?:
-		| ((
-				command: ParsedSlashCommand,
-				runtime: SlashCommandRuntime,
-		  ) => SlashCommandResult | Promise<SlashCommandResult>)
-		| ((command: ParsedSlashCommand, runtime: SlashCommandRuntime) => void | Promise<void>);
+	| ((
+		command: ParsedSlashCommand,
+		runtime: SlashCommandRuntime,
+	) => SlashCommandResult | Promise<SlashCommandResult>)
+	| ((command: ParsedSlashCommand, runtime: SlashCommandRuntime) => void | Promise<void>);
 	/**
 	 * TUI-only handler that supersedes `handle` when both are present. Use for
 	 * selectors, wizards, dashboards, and anything else that requires
@@ -159,11 +168,11 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 	 * function-type union shape.
 	 */
 	handleTui?:
-		| ((
-				command: ParsedSlashCommand,
-				runtime: TuiSlashCommandRuntime,
-		  ) => SlashCommandResult | Promise<SlashCommandResult>)
-		| ((command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime) => void | Promise<void>);
+	| ((
+		command: ParsedSlashCommand,
+		runtime: TuiSlashCommandRuntime,
+	) => SlashCommandResult | Promise<SlashCommandResult>)
+	| ((command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime) => void | Promise<void>);
 }
 
 /** Result returned by `executeAcpBuiltinSlashCommand`. */

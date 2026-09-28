@@ -313,8 +313,8 @@ import {
 	TOOL_EXECUTION_START_CUSTOM_TYPE,
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
-import { countImportantNotesReferenceTokens } from "./important-notes-context";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
+import { getImportantNotesFromEntries } from "./important-notes";
 import {
 	buildLaunchCompletionBatchMessage,
 	isLaunchCompletionOwner,
@@ -1539,7 +1539,6 @@ export class AgentSession {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
-			this.#requestImportantNotesTokens = this.getImportantNotesReferenceTokens();
 			if (!this.settings.get("retry.usageAwareFallback")) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -1560,6 +1559,7 @@ export class AgentSession {
 			model: () => this.model,
 			sessionId: () => this.sessionId,
 			importantNotesReferenceTokens: () => this.getImportantNotesReferenceTokens(),
+			hasImportantNotes: () => getImportantNotesFromEntries(this.sessionManager.getBranch()).length > 0,
 		};
 		this.#stats = new SessionStatsTracker(statsHost);
 		const memoryHost: SessionMemoryHost = {
@@ -2211,6 +2211,23 @@ export class AgentSession {
 			label: "user-force",
 			onRejected: info => (info.reason === "unavailable" ? "drop_sequence" : "requeue"),
 		});
+	}
+
+	#notesReferenceRequested = false;
+
+	/**
+		* Arm one-shot reinjection of the session-notes reference into the next
+		* primary model request (/notes). The notes context transform consumes it.
+		*/
+	requestNotesReference(): void {
+		this.#notesReferenceRequested = true;
+	}
+
+	/** Consume the armed notes-reference reinjection request, if any. */
+	takeNotesReferenceRequest(): boolean {
+		if (!this.#notesReferenceRequested) return false;
+		this.#notesReferenceRequested = false;
+		return true;
 	}
 
 	/** The tool-choice queue: forces forthcoming tool invocations and carries handlers. */
@@ -10715,13 +10732,9 @@ export class AgentSession {
 		return this.#stats.getSessionStats();
 	}
 
-	/** Tokens in the latest request-only note snapshot, using the outbound rendering policy. */
+	/** Reference tokens from the latest primary request, or the session-start warm estimate before one; 0 when notes are absent or injection is off. */
 	getImportantNotesReferenceTokens(): number {
-		return countImportantNotesReferenceTokens(
-			this.sessionManager.getBranch(),
-			this.agent.tokenizer,
-			this.#obfuscator,
-		);
+		return this.#requestImportantNotesTokens;
 	}
 
 	/** Capture the reference selected by the final primary request projection. */
