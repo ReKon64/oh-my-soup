@@ -16,6 +16,8 @@ import {
 	renderChangelogEntries,
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
+import type { ConfiguredThinkingLevel } from "@oh-my-soup/pi-tui/thinking";
+import { buildThinkingLevelCompletions } from "./builtin-completions";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "@oh-my-soup/pi-tui/chrome/format";
 import { handleMcpAcp } from "./helpers/mcp";
@@ -818,6 +820,39 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			await handleSpromptCommand(command.args, runtime.session, runtime.output);
+			return commandConsumed();
+		},
+	},
+	{
+		name: "thinking",
+		icon: "brain",
+		description: "Show or set the model thinking level (levels follow the active model)",
+		acpDescription: "Show or set thinking level",
+		inlineHint: "[<level>]",
+		allowArgs: true,
+		argumentCompletions: buildThinkingLevelCompletions,
+		handle: async (command, runtime) => {
+			const available: readonly string[] = runtime.session.getAvailableThinkingLevels();
+			const level = command.args.trim().toLowerCase();
+			if (!level) {
+				const current = runtime.session.thinkingLevel ?? "model default";
+				await runtime.output(
+					`Current thinking level: ${current}. Available: off, auto, ${available.join(", ")}. Use /thinking <level>.`,
+				);
+				return commandConsumed();
+			}
+			if (level === "off") {
+				runtime.session.setThinkingLevel("off", false);
+				await runtime.output("Thinking disabled.");
+				return commandConsumed();
+			}
+			if (level !== "auto" && !available.includes(level)) {
+				await runtime.output(`Unknown thinking level "${level}". Available: off, auto, ${available.join(", ")}.`);
+				return commandConsumed();
+			}
+			// Level validated against the model's available efforts above.
+			runtime.session.setThinkingLevel(level as ConfiguredThinkingLevel, false);
+			await runtime.output(`Thinking level set to ${level}.`);
 			return commandConsumed();
 		},
 	},

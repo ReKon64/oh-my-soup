@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/thinking [<level>]` command: show the session model's current thinking level, set a specific level, or turn thinking off — validated against the live model's available efforts, with argument autocomplete. Complements the `Shift+Tab` level cycler with direct in-chat selection.
+
 ## [18.4.3] - 2026-09-22
 
 ### Added
