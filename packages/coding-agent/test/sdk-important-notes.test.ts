@@ -679,6 +679,67 @@ describe("SDK important notes requests", () => {
 		}
 	});
 
+	for (const trigger of ["forced", "window-crossing"] as const) {
+		it(`refuses a ${trigger} notes reference after a quiet turn when it exceeds the safe request budget`, async () => {
+			using tempDir = TempDir.createSync(`sdk-notes-${trigger}-fit-`);
+			const contextWindow = 4096;
+			const { manager, model, authStorage, create } = await budgetFixture(tempDir, contextWindow, {
+				"compaction.enabled": false,
+				"provider.appendOnlyContext": "off",
+				"notes.injectAtWindowPercent": trigger === "window-crossing",
+				"notes.injectWindowPercent": 50,
+			});
+			manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, {
+				version: 1,
+				notes: [{ key: "reference", text: "0123456789abcdef".repeat(110) }],
+			});
+			const { session } = await create();
+			try {
+				const mock = createMockModel({ provider: model.provider, id: model.id, handler: { content: ["done"] } });
+				vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+				await session.prompt("Start.");
+				const noteTokens = session.getImportantNotesReferenceTokens();
+				expect(noteTokens).toBeGreaterThan(0);
+				await session.prompt("Continue.");
+				expect(noteData(mock.calls[1].context)).toEqual([]);
+				expect(session.getImportantNotesReferenceTokens()).toBe(0);
+
+				const budget =
+					contextWindow -
+					compaction.resolveBudgetReserveTokens(contextWindow, session.settings.getGroup("compaction"));
+				const tokenizer = session.agent.tokenizer;
+				const fixedTokens = computeNonMessageTokens(session, tokenizer);
+				const priorMessages = session.agent.state.messages;
+				let low = 1;
+				let high = 2048;
+				while (low < high) {
+					const middle = Math.floor((low + high) / 2);
+					const estimatedTokens =
+						fixedTokens +
+						tokenizer.countMessages([
+							...priorMessages,
+							{ role: "user", content: "0123456789abcdef".repeat(middle), timestamp: 0 },
+						]);
+					if (estimatedTokens >= budget - noteTokens / 2) high = middle;
+					else low = middle + 1;
+				}
+				const pending = "0123456789abcdef".repeat(low);
+				const withoutNotes =
+					fixedTokens +
+					tokenizer.countMessages([...priorMessages, { role: "user", content: pending, timestamp: 0 }]);
+				expect(withoutNotes).toBeLessThan(budget);
+				expect(withoutNotes + noteTokens).toBeGreaterThan(budget);
+
+				if (trigger === "forced") session.requestNotesReference();
+				await expect(session.prompt(pending)).rejects.toThrow("Saved notes are unchanged");
+				expect(mock.calls).toHaveLength(2);
+			} finally {
+				await session.dispose();
+				authStorage.close();
+			}
+		});
+	}
+
 	it("executes an unrelated custom notes override without preservation guidance or reminders", async () => {
 		using tempDir = TempDir.createSync("sdk-notes-custom-");
 		let executions = 0;

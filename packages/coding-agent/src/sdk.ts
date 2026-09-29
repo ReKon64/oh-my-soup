@@ -168,6 +168,7 @@ import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
 	assertImportantNotesFit,
 	ImportantNotesContext,
+	type ImportantNotesContextOptions,
 	type ImportantNotesProjection,
 } from "./session/important-notes-context";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
@@ -3590,6 +3591,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoUpdate: settings.get("notes.autoUpdate"),
 			autoUpdateCadence: settings.get("notes.autoUpdateCadence"),
 		});
+		const notesProjectionOptions = (
+			activeModel: Model,
+			forceInject: boolean,
+			branch = sessionManager.getBranch(),
+			policy = notesPolicy(),
+		): ImportantNotesContextOptions => {
+			const notesTool = resolveImportantNotesTool(session?.getActiveToolNames() ?? []);
+			const notesToolName = notesTool === "xd" ? "write" : notesTool;
+			return {
+				sessionId: sessionManager.getSessionId(),
+				branchGeneration: sessionManager.getBranchGeneration(),
+				branch,
+				model: activeModel,
+				compaction: settings.getGroup("compaction"),
+				tokenizer: agent.tokenizer,
+				nonMessageTokens: computeNonMessageTokens(session, agent.tokenizer, settings.revision),
+				contextUsageTokens: session.getContextUsage()?.tokens ?? undefined,
+				storedMessagesTokens: agent.tokenizer.countMessages(agent.state.messages, {
+					excludeEncryptedReasoning: true,
+				}),
+				notesTool,
+				notesToolName: notesToolName
+					? (toolRegistry.get(notesToolName)?.customWireName ?? notesToolName)
+					: undefined,
+				policy,
+				forceInject,
+				obfuscator,
+			};
+		};
 		let pendingNotesProjection: ImportantNotesProjection | undefined;
 		// Whether the pending primary projection's reference shipped because of an
 		// armed /notes inject: that arm is consume-once, so a failed delivery must
@@ -3602,33 +3632,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const wrapped = wrapSteeringForModel(withContext);
 			const activeModel = agent.state.model;
 			if (!activeModel) return wrapped;
-			const notesTool = resolveImportantNotesTool(session.getActiveToolNames());
-			const notesToolName = notesTool === "xd" ? "write" : notesTool;
-			const branch = sessionManager.getBranch();
-			const compaction = settings.getGroup("compaction");
-			const nonMessageTokens = computeNonMessageTokens(session, agent.tokenizer, settings.revision);
 			// Consume the armed /notes inject exactly once per primary request.
 			const forceInject = primary ? session.takeNotesReferenceRequest() : false;
-			const projection = importantNotesContext.transform(wrapped, {
-				sessionId: sessionManager.getSessionId(),
-				branchGeneration: sessionManager.getBranchGeneration(),
-				branch,
-				model: activeModel,
-				compaction,
-				tokenizer: agent.tokenizer,
-				nonMessageTokens,
-				contextUsageTokens: session.getContextUsage()?.tokens ?? undefined,
-				storedMessagesTokens: agent.tokenizer.countMessages(agent.state.messages, {
-					excludeEncryptedReasoning: true,
-				}),
-				notesTool,
-				notesToolName: notesToolName
-					? (toolRegistry.get(notesToolName)?.customWireName ?? notesToolName)
-					: undefined,
-				policy: notesPolicy(),
-				forceInject,
-				obfuscator,
-			});
+			const projectionOptions = notesProjectionOptions(activeModel, forceInject);
+			const projection = importantNotesContext.transform(wrapped, projectionOptions);
+			const { nonMessageTokens, compaction } = projectionOptions;
 			const referenceTokens = projection.referenceTokens;
 			if (primary) pendingNotesWasForceInject = forceInject;
 			// Refuse dispatch only when the irreducible floor — prompt overhead plus
@@ -4008,6 +4016,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,
+			estimateUpcomingImportantNotesReferenceTokens: (forceInject, pendingMessages) => {
+				const policy = notesPolicy();
+				const branch = sessionManager.getBranch();
+				if (
+					!forceInject &&
+					(!policy.injectAfterCompaction ||
+						!importantNotesContext.boundaryNeedsReference(sessionManager.getSessionId(), branch)) &&
+					!policy.injectOnTurns &&
+					!policy.injectAtTokenThreshold &&
+					!policy.injectAtWindowPercent
+				) {
+					return 0;
+				}
+				const activeModel = agent.state.model;
+				if (!activeModel) return 0;
+				const messages =
+					pendingMessages.length > 0 ? [...agent.state.messages, ...pendingMessages] : agent.state.messages;
+				return importantNotesContext.preflightReferenceTokens(
+					messages,
+					notesProjectionOptions(activeModel, forceInject, branch, policy),
+				);
+			},
 			additionalExtensionPaths: options.additionalExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
 			preparedExtensions: extensionsResult.preparedExtensions,

@@ -1973,7 +1973,12 @@ export class AgentSession {
 			goalModeState: () => this.#goalModeState,
 			planReferencePath: () => this.#planReferencePath,
 			nonMessageTokenSource: () => this,
-			importantNotesReferenceTokens: () => this.getImportantNotesReferenceTokens(),
+			importantNotesReferenceTokens: (pendingMessages = []) =>
+				Math.max(
+					this.getImportantNotesReferenceTokens(),
+					config.estimateUpcomingImportantNotesReferenceTokens?.(this.#notesReferenceRequested, pendingMessages) ??
+						0,
+				),
 			hasExperimentalContextRolloverTools: () => {
 				const enabled = this.#tools.getEnabledToolNames();
 				for (const name in EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS) {
@@ -5273,6 +5278,9 @@ export class AgentSession {
 		// on-disk record and the plain `transcript:true` export path keep the full
 		// pre-reset history.
 		this.sessionManager.appendResetBoundary();
+		// The old request's reference left with the reset history; maintenance
+		// estimates a new boundary reference from the surviving notes instead.
+		this.#requestImportantNotesTokens = 0;
 
 		resetCapabilities();
 		await this.refreshBaseSystemPrompt();

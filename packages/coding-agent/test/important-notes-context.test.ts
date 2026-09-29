@@ -449,7 +449,9 @@ describe("important notes request projection", () => {
 		// One assistant turn below the cadence: nothing appended to the request.
 		const input = context(1);
 		expect(turns.transform(input, turnOptions()).messages).toEqual(input);
+		expect(turns.preflightReferenceTokens(input, turnOptions())).toBe(0);
 		// Two assistant turns since the injection mark: reinject.
+		expect(turns.preflightReferenceTokens(context(2), turnOptions())).toBeGreaterThan(0);
 		expect(referenceNotes(turns.transform(context(2), turnOptions()).messages)).toEqual([
 			{ key: "port", text: "8123" },
 		]);
@@ -512,6 +514,8 @@ describe("important notes request projection", () => {
 		expect(referenceNotes(deliver(token, [], tokenOpts(1_000)))).toHaveLength(1);
 		// Below threshold: quiet.
 		expect(deliver(token, [], tokenOpts(3_000))).toHaveLength(0);
+		expect(token.preflightReferenceTokens([], tokenOpts(3_000))).toBe(0);
+		expect(token.preflightReferenceTokens([], tokenOpts(6_000))).toBeGreaterThan(0);
 		// Crossing upward: inject.
 		expect(deliver(token, [], tokenOpts(6_000))).toHaveLength(1);
 		// Still above the threshold: no re-inject until it drops back below.
@@ -530,6 +534,7 @@ describe("important notes request projection", () => {
 			});
 		expect(referenceNotes(deliver(windows, [], windowOpts(1_000)))).toHaveLength(1);
 		expect(deliver(windows, [], windowOpts(3_000))).toHaveLength(0);
+		expect(windows.preflightReferenceTokens([], windowOpts(6_000))).toBeGreaterThan(0);
 		expect(deliver(windows, [], windowOpts(6_000))).toHaveLength(1);
 		expect(deliver(windows, [], windowOpts(7_000))).toHaveLength(0);
 		// Drop below re-arms, re-cross injects again.
@@ -597,6 +602,26 @@ describe("important notes warm and fit guards", () => {
 		expect(warm(undefined, true)).toBe(0);
 		expect(warm("notes", false)).toBe(0);
 		expect(warm("notes", true)).toBeGreaterThan(0);
+	});
+
+	it("reserves a reference only until each compaction or clear boundary is delivered", () => {
+		const manager = SessionManager.inMemory();
+		const kept = manager.appendMessage({ role: "user", content: "history", timestamp: 1 });
+		const notes = [{ key: "evidence", text: "port 8123" }];
+		save(manager, notes);
+		const context = new ImportantNotesContext();
+		const firstTokens = context.preflightReferenceTokens([], options(manager));
+		expect(firstTokens).toBeGreaterThan(0);
+		expect(referenceNotes(deliver(context, [], options(manager)))).toEqual(notes);
+		expect(context.preflightReferenceTokens([], options(manager))).toBe(0);
+
+		manager.appendCompaction("summary", undefined, kept, 1_000);
+		expect(context.preflightReferenceTokens([], options(manager))).toBe(firstTokens);
+		expect(referenceNotes(deliver(context, [], options(manager)))).toEqual(notes);
+		expect(context.preflightReferenceTokens([], options(manager))).toBe(0);
+
+		manager.appendResetBoundary();
+		expect(context.preflightReferenceTokens([], options(manager))).toBe(firstTokens);
 	});
 
 	it("importantNotesFit refuses an oversized reference and passes at zero tokens", () => {

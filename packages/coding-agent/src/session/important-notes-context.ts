@@ -177,6 +177,21 @@ export function assertImportantNotesFit(
 	);
 }
 
+function latestNotesBoundary(branch: SessionEntry[]): { id: string | null; index: number } {
+	const compactionEntry = getLatestCompactionEntry(branch);
+	let id = compactionEntry?.id ?? null;
+	let index = compactionEntry ? branch.lastIndexOf(compactionEntry) : -1;
+	for (let cursor = branch.length - 1; cursor > index; cursor--) {
+		const entry = branch[cursor];
+		if (entry.type === "reset_boundary") {
+			id = entry.id;
+			index = cursor;
+			break;
+		}
+	}
+	return { id, index };
+}
+
 /** Per-session request projection. Neither messages nor journal entries are mutated. */
 export class ImportantNotesContext {
 	#contextKey: string | undefined;
@@ -191,18 +206,41 @@ export class ImportantNotesContext {
 	/** Reference-free context estimate at the last acknowledged request, for threshold-crossing detection. */
 	#lastUsageEstimate: number | undefined = undefined;
 
-	/**
-	 * Token count of the reference the next request would carry at the
-	 * session-start boundary; 0 when injection is disabled or no notes exist.
-	 * Session assembly records this eagerly so pre-prompt maintenance reserves
-	 * budget for a reference that has not been projected yet.
-	 */
+	/** Count the current reference without claiming delivery; forceInject bypasses the policy/tool gates. */
 	warm(
-		options: Pick<ImportantNotesContextOptions, "branch" | "tokenizer" | "obfuscator" | "notesTool" | "policy">,
+		options: Pick<
+			ImportantNotesContextOptions,
+			"branch" | "tokenizer" | "obfuscator" | "notesTool" | "policy" | "forceInject"
+		>,
 	): number {
-		if (options.notesTool === undefined || !policyInjects(options.policy)) return 0;
+		if (options.forceInject !== true && (options.notesTool === undefined || !policyInjects(options.policy))) return 0;
 		const reference = referenceMessage(options.branch, options.obfuscator, options.policy.timestamps);
 		return reference ? options.tokenizer.countMessage(reference) : 0;
+	}
+
+	/** A compaction, /clear, or new session has not yet shipped its reference. */
+	boundaryNeedsReference(sessionId: string, branch: SessionEntry[]): boolean {
+		return this.#ackedSessionId !== sessionId || this.#injectedBoundaryId !== latestNotesBoundary(branch).id;
+	}
+
+	/** Reserve only when the next projection would inject; never acknowledge it here. */
+	preflightReferenceTokens(messages: AgentMessage[], options: ImportantNotesContextOptions): number {
+		const policy = options.policy;
+		if (
+			options.forceInject === true ||
+			(policy.injectAfterCompaction &&
+				options.notesTool !== undefined &&
+				this.boundaryNeedsReference(options.sessionId, options.branch))
+		) {
+			return this.warm(options);
+		}
+		if (
+			options.notesTool === undefined ||
+			(!policy.injectOnTurns && !policy.injectAtTokenThreshold && !policy.injectAtWindowPercent)
+		) {
+			return 0;
+		}
+		return this.transform(messages, options).referenceTokens;
 	}
 
 	transform(messages: AgentMessage[], options: ImportantNotesContextOptions): ImportantNotesProjection {
@@ -216,16 +254,7 @@ export class ImportantNotesContext {
 					? resolveThresholdTokens(contextWindow, compaction)
 					: contextWindow;
 		}
-		const compactionEntry = getLatestCompactionEntry(branch);
-		let boundaryId = compactionEntry?.id;
-		let boundaryIndex = compactionEntry ? branch.lastIndexOf(compactionEntry) : -1;
-		for (let index = branch.length - 1; index > boundaryIndex; index--) {
-			if (branch[index].type === "reset_boundary") {
-				boundaryId = branch[index].id;
-				boundaryIndex = index;
-				break;
-			}
-		}
+		const { id: boundaryId, index: boundaryIndex } = latestNotesBoundary(branch);
 		const contextKey = JSON.stringify([
 			options.sessionId,
 			options.branchGeneration,
