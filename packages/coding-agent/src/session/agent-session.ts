@@ -8497,6 +8497,8 @@ export class AgentSession {
 				// point keeps the status line honest even if a later step below throws.
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
+				// The delivered reference belonged to the old conversation.
+				this.#requestImportantNotesTokens = 0;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
@@ -9708,6 +9710,7 @@ export class AgentSession {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		const previousRequestImportantNotesTokens = this.#requestImportantNotesTokens;
 
 		// Snapshot the full checkpoint runtime state: the success path calls
 		// #rehydrateCheckpointRewindState(), which clears and rebuilds all four
@@ -9744,6 +9747,7 @@ export class AgentSession {
 				await this.#advisors.drainAndDetachRecorders();
 			}
 			await this.sessionManager.setSessionFile(sessionPath);
+			if (switchingToDifferentSession) this.#requestImportantNotesTokens = 0;
 			this.#bash.markSessionTransition(bashTransition);
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
@@ -9925,6 +9929,7 @@ export class AgentSession {
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
+			this.#requestImportantNotesTokens = previousRequestImportantNotesTokens;
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();

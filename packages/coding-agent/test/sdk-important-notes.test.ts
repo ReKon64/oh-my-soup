@@ -740,6 +740,63 @@ describe("SDK important notes requests", () => {
 		});
 	}
 
+	for (const transition of ["new", "resume"] as const) {
+		it(`does not carry the previous notes reference into a ${transition} session's context figure`, async () => {
+			using tempDir = TempDir.createSync(`sdk-notes-${transition}-context-`);
+			const { manager, model, authStorage, create } = await budgetFixture(tempDir, 4096, {
+				"compaction.enabled": false,
+				"provider.appendOnlyContext": "off",
+			});
+			manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, {
+				version: 1,
+				notes: [{ key: "reference", text: "0123456789abcdef".repeat(110) }],
+			});
+			const { session } = await create();
+			try {
+				const mock = createMockModel({ provider: model.provider, id: model.id, handler: { content: ["done"] } });
+				vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+				await session.prompt("Start.");
+				expect(noteData(mock.calls[0].context)).toHaveLength(1);
+				expect(session.getImportantNotesReferenceTokens()).toBeGreaterThan(0);
+
+				if (transition === "new") {
+					expect(await session.newSession()).toBe(true);
+				} else {
+					const oldUsage = session.getContextBreakdown()?.usedTokens;
+					const rejected = SessionManager.create(tempDir.join("other-workspace"), tempDir.join("sessions"));
+					try {
+						await rejected.ensureOnDisk();
+						await rejected.flush();
+						const rejectedFile = rejected.getSessionFile();
+						if (!rejectedFile) throw new Error("Expected persisted rejected session");
+						expect(await session.switchSession(rejectedFile)).toBe(false);
+						expect(session.getContextBreakdown()?.usedTokens).toBe(oldUsage);
+					} finally {
+						await rejected.close();
+					}
+
+					const target = SessionManager.create(tempDir.path(), tempDir.join("sessions"));
+					try {
+						await target.ensureOnDisk();
+						await target.flush();
+						const targetFile = target.getSessionFile();
+						if (!targetFile) throw new Error("Expected persisted target session");
+						expect(await session.switchSession(targetFile)).toBe(true);
+					} finally {
+						await target.close();
+					}
+				}
+
+				expect(session.getContextBreakdown()?.usedTokens).toBe(
+					computeNonMessageTokens(session, session.agent.tokenizer, session.settings.revision),
+				);
+			} finally {
+				await session.dispose();
+				authStorage.close();
+			}
+		});
+	}
+
 	it("executes an unrelated custom notes override without preservation guidance or reminders", async () => {
 		using tempDir = TempDir.createSync("sdk-notes-custom-");
 		let executions = 0;
