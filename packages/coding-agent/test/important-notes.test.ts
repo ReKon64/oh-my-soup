@@ -18,7 +18,13 @@ describe("important notes event-sourced journal", () => {
 		seed(manager, { version: 1, notes: [{ key: "address", text: "0x401000" }] });
 		seed(manager, { version: 2, op: "set", key: "server", text: "bun run dev", at: "2026-09-27T10:00:00.000Z" });
 		seed(manager, { version: 2, op: "delete", key: "address" });
-		seed(manager, { version: 2, op: "set", key: "server", text: "bun run dev --port 9000", at: "2026-09-27T11:00:00.000Z" });
+		seed(manager, {
+			version: 2,
+			op: "set",
+			key: "server",
+			text: "bun run dev --port 9000",
+			at: "2026-09-27T11:00:00.000Z",
+		});
 		const state = getImportantNotesState(manager.getBranch());
 		expect(state.notes).toEqual([
 			{ key: "server", text: "bun run dev --port 9000", updatedAt: "2026-09-27T11:00:00.000Z" },

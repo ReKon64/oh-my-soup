@@ -7,16 +7,12 @@ import type { Theme } from "@oh-my-soup/pi-tui/theme";
 import notesDescription from "../prompts/tools/notes.md" with { type: "text" };
 import { findBeadsWorkspaceRoot, NativeBeadsRepository } from "../beads/repository";
 import {
-	applyImportantNotesMutation,
 	assertImportantNoteKey,
 	formatNoteTimestamp,
 	getImportantNotesFromEntries,
-	getImportantNotesState,
-	IMPORTANT_NOTES_CUSTOM_TYPE,
 	IMPORTANT_NOTES_MAX_CHARS,
-	IMPORTANT_NOTES_SNAPSHOT_EVERY,
-	type ImportantNotesEntryData,
 	type ImportantNote,
+	writeSessionNotes,
 } from "../session/important-notes";
 import {
 	createCachedComponent,
@@ -90,83 +86,51 @@ export class NotesTool implements AgentTool<typeof notesSchema, NotesToolDetails
 			if (params.op === "list") {
 				notes = await manager.readEntriesAtomically(readNotes);
 				if (params.key !== undefined) {
-					assertImportantNoteKey(params.key);
 					const note = notes.find(entry => entry.key === params.key);
-					if (!note) throw new Error(`Note not found: ${params.key}`);
+					if (!note) {
+						assertImportantNoteKey(params.key);
+						throw new Error(`Note not found: ${params.key}`);
+					}
 					notes = [{ ...note }];
 				}
 			} else {
-				const mutation = { op: params.op, key: params.key, text: params.text };
-				const assertOwner = () => {
-					if (!ownsBranch()) {
+				const owner = { sessionId: manager.getSessionId(), branchGeneration: manager.getBranchGeneration() };
+				previousNotes = await manager.readEntriesAtomically(() => {
+					if (manager.getSessionId() !== sessionId || manager.getBranchGeneration() !== branchGeneration) {
 						throw new Error(
 							"Note update rejected: the active session or branch changed. Retry in the current session.",
 						);
 					}
-				};
-				// Validate only committed state, without touching disk for rejected input.
-				await manager.readEntriesAtomically(() => {
-					assertOwner();
-					previousNotes = getImportantNotesFromEntries(manager.getBranch());
-					applyImportantNotesMutation(previousNotes, mutation);
+					return getImportantNotesFromEntries(manager.getBranch()).map(note => ({ ...note }));
 				});
-				// Recompute after queued writes, and reject replaced-session requests
-				// before staging and after publication. Return only an owned snapshot.
-				notes = await manager.appendEntriesAtomically(() => {
-					const current = getImportantNotesState(manager.getBranch());
-					const updated = applyImportantNotesMutation(current.notes, mutation);
-					if (updated !== current.notes) {
-						// Event-sourced journaling: one mutation appends one small event
-						// entry; a fresh full snapshot is written every N events to bound
-						// the read-time fold. Both shapes must carry the mutation's `at` —
-						// the fold stamps events, but a snapshot becomes the base and is
-						// never re-folded, so stamp here too or the 32nd set loses its date.
-						const at = new Date().toISOString();
-						const stamped =
-							mutation.op === "set"
-								? updated.map(note => (note.key === mutation.key ? { ...note, updatedAt: at } : note))
-								: updated;
-						const data: ImportantNotesEntryData =
-							current.pendingEvents + 1 >= IMPORTANT_NOTES_SNAPSHOT_EVERY
-								? { version: 2, snapshot: true, notes: stamped }
-								: {
-									version: 2,
-									op: mutation.op,
-									key: mutation.key,
-									text: mutation.text,
-									at,
-								};
-						manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, data);
-					}
-					return readNotes();
-				}, assertOwner);
+				notes = await writeSessionNotes(manager, { op: params.op, key: params.key, text: params.text }, owner);
 			}
 			const chars = notes.reduce((total, note) => total + note.key.length + note.text.length, 0);
+			const visibleNotes = timestamps ? notes : notes.map(({ key, text }) => ({ key, text }));
 			const location = storage === "session" ? "session journal" : "memory only; not persisted to disk";
 			const summary = `${notes.length} notes, ${chars}/${IMPORTANT_NOTES_MAX_CHARS} characters (${location}).`;
 			return {
 				content: [
 					{
 						type: "text",
-						text: params.op === "list" ? `${summary}\n${JSON.stringify(notes)}` : summary,
+						text: params.op === "list" ? `${summary}\n${JSON.stringify(visibleNotes)}` : summary,
 					},
 				],
-				details: { op: params.op, notes, storage, scope: "session", timestamps },
+				details: { op: params.op, notes: visibleNotes, storage, scope: "session", timestamps },
 			};
 		} catch (error) {
+			const failedNotes = manager
+				? await manager.readEntriesAtomically(() =>
+						ownsBranch() ? getImportantNotesFromEntries(manager.getBranch()) : previousNotes,
+					)
+				: [];
 			return {
 				content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
 				details: {
 					op: params.op,
-					notes: manager
-						? await manager.readEntriesAtomically(() =>
-								(ownsBranch() ? getImportantNotesFromEntries(manager.getBranch()) : previousNotes).map(
-									note => ({
-										...note,
-									}),
-								),
-							)
-						: [],
+					notes: (timestamps ? failedNotes : failedNotes.map(({ key, text }) => ({ key, text }))).map(note => ({
+						...note,
+					})),
 					storage,
 					scope: "session",
 					timestamps,

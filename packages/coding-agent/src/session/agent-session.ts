@@ -2216,9 +2216,9 @@ export class AgentSession {
 	#notesReferenceRequested = false;
 
 	/**
-		* Arm one-shot reinjection of the session-notes reference into the next
-		* primary model request (/notes). The notes context transform consumes it.
-		*/
+	 * Arm one-shot reinjection of the session-notes reference into the next
+	 * primary model request (/notes). The notes context transform consumes it.
+	 */
 	requestNotesReference(): void {
 		this.#notesReferenceRequested = true;
 	}

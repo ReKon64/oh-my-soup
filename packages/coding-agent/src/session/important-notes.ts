@@ -1,5 +1,6 @@
 import { isRecord } from "@oh-my-soup/pi-utils";
 import type { SessionEntry } from "./session-entries";
+import type { SessionManager } from "./session-manager";
 
 export interface ImportantNote {
 	key: string;
@@ -42,7 +43,10 @@ export interface ImportantNotesEventData {
 	at?: string;
 }
 
-export type ImportantNotesEntryData = ImportantNotesSnapshotDataV1 | ImportantNotesSnapshotData | ImportantNotesEventData;
+export type ImportantNotesEntryData =
+	| ImportantNotesSnapshotDataV1
+	| ImportantNotesSnapshotData
+	| ImportantNotesEventData;
 
 export interface ImportantNotesMutation {
 	op: "set" | "delete" | "clear";
@@ -64,11 +68,11 @@ export function stripNoteControlChars(text: string): string {
 		.replace(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/g, "");
 }
 
-function keyError(key: unknown): string | undefined {
+function keyError(key: unknown, allowLegacyControls = false): string | undefined {
 	if (typeof key !== "string" || key.length === 0 || key !== key.trim()) {
 		return "Note key must be a nonblank string without leading or trailing whitespace.";
 	}
-	if (/[\u0000-\u001F\u007F-\u009F]/.test(key)) {
+	if (!allowLegacyControls && /[\u0000-\u001F\u007F-\u009F]/.test(key)) {
 		return "Note key must not contain control characters.";
 	}
 	if (key.length > IMPORTANT_NOTES_MAX_KEY_CHARS) {
@@ -77,7 +81,7 @@ function keyError(key: unknown): string | undefined {
 	return undefined;
 }
 
-function snapshotError(notes: unknown): string | undefined {
+function snapshotError(notes: unknown, allowLegacyControls = false): string | undefined {
 	if (!Array.isArray(notes)) return "Notes must be an array.";
 	if (notes.length > IMPORTANT_NOTES_MAX_ENTRIES) {
 		return `Notes exceed ${IMPORTANT_NOTES_MAX_ENTRIES} entries; delete an existing key first.`;
@@ -91,7 +95,7 @@ function snapshotError(notes: unknown): string | undefined {
 		if (note.updatedAt !== undefined && typeof note.updatedAt !== "string") {
 			return "Note updatedAt must be a string when present.";
 		}
-		const error = keyError(note.key);
+		const error = keyError(note.key, allowLegacyControls);
 		if (error) return error;
 		if (keys.has(note.key)) return `Duplicate note key: ${note.key}`;
 		keys.add(note.key);
@@ -114,9 +118,12 @@ export function applyImportantNotesMutation(
 	mutation: ImportantNotesMutation,
 ): readonly ImportantNote[] {
 	if (mutation.op === "clear") return notes.length === 0 ? notes : [];
-	assertImportantNoteKey(mutation.key);
 	const key = mutation.key;
+	if (typeof key !== "string") assertImportantNoteKey(key);
 	const index = notes.findIndex(note => note.key === key);
+	// A migrated v1 key may contain controls. Existing keys remain editable
+	// or deletable, but no mutation may introduce a new unsafe key.
+	if (index < 0) assertImportantNoteKey(key);
 	if (mutation.op === "delete") {
 		if (index < 0) throw new Error(`Note not found: ${key}`);
 		return notes.filter(note => note.key !== key);
@@ -128,7 +135,7 @@ export function applyImportantNotesMutation(
 	const note = { key, text: mutation.text };
 	if (index < 0) updated.push(note);
 	else updated[index] = note;
-	const validationError = snapshotError(updated);
+	const validationError = snapshotError(updated, true);
 	if (validationError) throw new Error(validationError);
 	return updated;
 }
@@ -156,12 +163,12 @@ export function getImportantNotesState(entries: readonly SessionEntry[]): Import
 		if (entry.type !== "custom" || entry.customType !== IMPORTANT_NOTES_CUSTOM_TYPE) continue;
 		const data = entry.data;
 		if (!isRecord(data)) continue;
-		if (data.version === 2 && data.snapshot === true && snapshotError(data.notes) === undefined) {
+		if (data.version === 2 && data.snapshot === true && snapshotError(data.notes, true) === undefined) {
 			baseIndex = index;
 			notes = data.notes as readonly ImportantNote[];
 			break;
 		}
-		if (data.version === 1 && snapshotError(data.notes) === undefined) {
+		if (data.version === 1 && snapshotError(data.notes, true) === undefined) {
 			baseIndex = index;
 			notes = data.notes as readonly ImportantNote[];
 			break;
@@ -188,20 +195,84 @@ export function getImportantNotesFromEntries(entries: readonly SessionEntry[]): 
 	return getImportantNotesState(entries).notes;
 }
 
+/** Commit the same validated, owned event/snapshot mutation for tools and slash commands. */
+export async function writeSessionNotes(
+	manager: Pick<
+		SessionManager,
+		| "getSessionId"
+		| "getBranchGeneration"
+		| "readEntriesAtomically"
+		| "appendEntriesAtomically"
+		| "getBranch"
+		| "appendCustomEntry"
+	>,
+	mutation: ImportantNotesMutation,
+	owner: { sessionId: string; branchGeneration: number; previousText?: string } = {
+		sessionId: manager.getSessionId(),
+		branchGeneration: manager.getBranchGeneration(),
+	},
+): Promise<readonly ImportantNote[]> {
+	const assertOwner = () => {
+		if (manager.getSessionId() !== owner.sessionId || manager.getBranchGeneration() !== owner.branchGeneration) {
+			throw new Error("Note update rejected: the active session or branch changed. Retry in the current session.");
+		}
+	};
+	const validate = (notes: readonly ImportantNote[]) => {
+		if (
+			owner.previousText !== undefined &&
+			notes.find(note => note.key === mutation.key)?.text !== owner.previousText
+		) {
+			throw new Error("Note update rejected: the note changed while the editor was open.");
+		}
+		return applyImportantNotesMutation(notes, mutation);
+	};
+	// Fail before staging a journal write, then recompute under the publication
+	// lock: queued writers may have changed the note or its size budget.
+	await manager.readEntriesAtomically(() => {
+		assertOwner();
+		validate(getImportantNotesFromEntries(manager.getBranch()));
+	});
+	return manager.appendEntriesAtomically(() => {
+		const current = getImportantNotesState(manager.getBranch());
+		const updated = validate(current.notes);
+		if (updated !== current.notes) {
+			const at = new Date().toISOString();
+			const stamped =
+				mutation.op === "set"
+					? updated.map(note => (note.key === mutation.key ? { ...note, updatedAt: at } : note))
+					: updated;
+			const data: ImportantNotesEntryData =
+				current.pendingEvents + 1 >= IMPORTANT_NOTES_SNAPSHOT_EVERY
+					? { version: 2, snapshot: true, notes: stamped }
+					: { version: 2, op: mutation.op, key: mutation.key, text: mutation.text, at };
+			manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, data);
+		}
+		return getImportantNotesFromEntries(manager.getBranch()).map(note => ({ ...note }));
+	}, assertOwner);
+}
+
 /**
  * Assistant replies accumulated after the most recent notes mutation, stopping
  * at a compaction or reset boundary — whichever the backward walk meets first.
  * Branch-derived, so the count survives resume without extra state.
  */
-export function countTurnsSinceLastNotesEntry(entries: readonly SessionEntry[]): number {
+export function notesUpdateCadenceState(entries: readonly SessionEntry[]): { turns: number; anchor?: string } {
 	let turns = 0;
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index];
-		if (entry.type === "custom" && entry.customType === IMPORTANT_NOTES_CUSTOM_TYPE) break;
-		if (entry.type === "compaction" || entry.type === "reset_boundary") break;
+		if (entry.type === "custom" && entry.customType === IMPORTANT_NOTES_CUSTOM_TYPE) {
+			return { turns, anchor: entry.id };
+		}
+		if (entry.type === "compaction" || entry.type === "reset_boundary") {
+			return { turns, anchor: entry.id };
+		}
 		if (entry.type === "message" && entry.message.role === "assistant") turns++;
 	}
-	return turns;
+	return { turns };
+}
+
+export function countTurnsSinceLastNotesEntry(entries: readonly SessionEntry[]): number {
+	return notesUpdateCadenceState(entries).turns;
 }
 
 const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;

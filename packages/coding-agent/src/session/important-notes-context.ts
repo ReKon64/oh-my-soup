@@ -12,10 +12,7 @@ import referenceTemplate from "../prompts/system/important-notes-reference.md" w
 import reminderTemplate from "../prompts/system/important-notes-reminder.md" with { type: "text" };
 import autoUpdateTemplate from "../prompts/system/important-notes-autoupdate.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets";
-import {
-	countTurnsSinceLastNotesEntry,
-	getImportantNotesFromEntries,
-} from "./important-notes";
+import { notesUpdateCadenceState, getImportantNotesFromEntries } from "./important-notes";
 import { convertToLlm } from "./messages";
 import { getLatestCompactionEntry } from "./session-context";
 import type { SessionEntry } from "./session-entries";
@@ -139,7 +136,10 @@ function countAssistantMessages(messages: readonly AgentMessage[]): number {
 /** Whether any injection trigger is enabled. */
 function policyInjects(policy: ImportantNotesPolicy): boolean {
 	return (
-		policy.injectAfterCompaction || policy.injectOnTurns || policy.injectAtTokenThreshold || policy.injectAtWindowPercent
+		policy.injectAfterCompaction ||
+		policy.injectOnTurns ||
+		policy.injectAtTokenThreshold ||
+		policy.injectAtWindowPercent
 	);
 }
 
@@ -169,11 +169,11 @@ export function assertImportantNotesFit(
 	if (contextTokens <= budget) return;
 	throw new Error(
 		`Important notes cannot fit the safe context budget for ${model.provider}/${model.id} ` +
-		`(${contextTokens} estimated input tokens, ${budget} available; ${referenceTokens} in the notes reference). ` +
-		"Saved notes are unchanged. " +
-		(options?.attemptedRecovery
-			? "Automatic recovery (pruning and eliding tool results, dropping images, and compaction where available) could not reclaim enough space. Select a larger-context model or /clear the conversation; saved notes survive both."
-			: "Select a larger-context model, or explicitly shorten or delete notes before retrying."),
+			`(${contextTokens} estimated input tokens, ${budget} available; ${referenceTokens} in the notes reference). ` +
+			"Saved notes are unchanged. " +
+			(options?.attemptedRecovery
+				? "Automatic recovery (pruning and eliding tool results, dropping images, and compaction where available) could not reclaim enough space. Select a larger-context model or /clear the conversation; saved notes survive both."
+				: "Select a larger-context model, or explicitly shorten or delete notes before retrying."),
 	);
 }
 
@@ -185,8 +185,8 @@ export class ImportantNotesContext {
 	#ackedSessionId: string | undefined = undefined;
 	#injectedBoundaryId: string | null | undefined = undefined;
 	#injectedTurnMark: number | undefined = undefined;
-	/** Boundary id of the cycle in which the auto-update nudge last fired. */
-	#nudgedBoundaryId: string | null | undefined = undefined;
+	/** Last acknowledged nudge's session, branch and mutation/reset anchor. */
+	#nudgedAnchor: string | undefined;
 	#nudgedTurns = -1;
 	/** Reference-free context estimate at the last acknowledged request, for threshold-crossing detection. */
 	#lastUsageEstimate: number | undefined = undefined;
@@ -238,7 +238,6 @@ export class ImportantNotesContext {
 		const reminded = this.#contextKey === contextKey && this.#reminded;
 
 		const injectEnabled = options.notesTool !== undefined && policyInjects(policy);
-		const boundaryKey = boundaryId ?? "root";
 		// forceInject (operator /notes) bypasses the inject toggles: the
 		// reference still requires notes to exist (referenceMessage handles that).
 		const reference =
@@ -301,20 +300,30 @@ export class ImportantNotesContext {
 		const thresholdCrossed = (limit: number): boolean =>
 			usageEstimate >= limit && (this.#lastUsageEstimate === undefined || this.#lastUsageEstimate < limit);
 		const crossingDue =
-			(policy.injectAtTokenThreshold && policy.injectTokenThreshold > 0 &&
+			(policy.injectAtTokenThreshold &&
+				policy.injectTokenThreshold > 0 &&
 				thresholdCrossed(policy.injectTokenThreshold)) ||
-			(policy.injectAtWindowPercent && policy.injectWindowPercent > 0 && contextWindow > 0 &&
+			(policy.injectAtWindowPercent &&
+				policy.injectWindowPercent > 0 &&
+				contextWindow > 0 &&
 				thresholdCrossed(Math.floor((contextWindow * policy.injectWindowPercent) / 100)));
 		const shouldInject =
 			reference !== undefined &&
-			((boundaryChanged && policy.injectAfterCompaction) || turnCadenceDue || crossingDue || options.forceInject === true);
+			((boundaryChanged && policy.injectAfterCompaction) ||
+				turnCadenceDue ||
+				crossingDue ||
+				options.forceInject === true);
 
-		const turnsSinceMutation = countTurnsSinceLastNotesEntry(branch);
+		const updateState =
+			policy.autoUpdate && options.notesTool !== undefined ? notesUpdateCadenceState(branch) : undefined;
+		const turnsSinceMutation = updateState?.turns ?? 0;
+		const nudgeAnchor = updateState
+			? JSON.stringify([options.sessionId, options.branchGeneration, updateState.anchor])
+			: undefined;
 		const nudgeDue =
-			policy.autoUpdate &&
-			options.notesTool !== undefined &&
+			updateState !== undefined &&
 			turnsSinceMutation >= policy.autoUpdateCadence &&
-			(this.#nudgedBoundaryId !== boundaryKey || this.#nudgedTurns !== turnsSinceMutation);
+			(this.#nudgedAnchor !== nudgeAnchor || turnsSinceMutation - this.#nudgedTurns >= policy.autoUpdateCadence);
 
 		const notesTokens = shouldInject && reference ? tokenizer.countMessage(reference) : 0;
 		// When the usage anchor is present it already contains any reference the
@@ -372,7 +381,7 @@ export class ImportantNotesContext {
 					this.#injectedTurnMark = turnCount;
 				}
 				if (nudgeDue) {
-					this.#nudgedBoundaryId = boundaryKey;
+					this.#nudgedAnchor = nudgeAnchor;
 					this.#nudgedTurns = turnsSinceMutation;
 				}
 				// Advance the crossing baseline whenever notes exist (drops below

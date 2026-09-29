@@ -315,6 +315,48 @@ describe("session important notes", () => {
 		expect(journalNotes(manager.getBranch())).toEqual([]);
 	});
 
+	it("resumes a legacy control-character key through later events and a snapshot without accepting new unsafe keys", async () => {
+		const manager = SessionManager.inMemory();
+		const legacy = { key: "leg\u0007acy\nkey", text: "retained across migrations" };
+		manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, { version: 1, notes: [legacy] });
+		const tool = new NotesTool(toolSession(manager));
+		expect(journalNotes(manager.getBranch())).toEqual([legacy]);
+		expect((await tool.execute("read-legacy", { op: "list", key: legacy.key })).details?.notes[0]?.text).toBe(
+			legacy.text,
+		);
+		const before = manager.getEntries().length;
+		expect((await tool.execute("invalid-key", { op: "set", key: "new\u0007key", text: "not saved" })).isError).toBe(
+			true,
+		);
+		expect(manager.getEntries()).toHaveLength(before);
+		for (let index = 0; index < 32; index++) {
+			expect(
+				(await tool.execute(`valid-${index}`, { op: "set", key: "server", text: `port ${index}` })).isError,
+			).toBeUndefined();
+		}
+		expect(manager.getBranch().at(-1)).toMatchObject({ type: "custom", data: { snapshot: true } });
+		expect(journalNotes(manager.getBranch())).toEqual([legacy, { key: "server", text: "port 31" }]);
+		expect(
+			(await tool.execute("update-legacy", { op: "set", key: legacy.key, text: "updated legacy" })).isError,
+		).toBeUndefined();
+		expect(journalNotes(manager.getBranch())).toEqual([
+			{ ...legacy, text: "updated legacy" },
+			{ key: "server", text: "port 31" },
+		]);
+	});
+
+	it("hides stored timestamps from tool-visible list and details when the setting is off", async () => {
+		const manager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "notes.timestamps": false });
+		const tool = new NotesTool(toolSession(manager, { settings }));
+		const saved = await tool.execute("save", { op: "set", key: "server", text: "port 8123" });
+		expect(saved.isError).toBeUndefined();
+		const listed = await tool.execute("list", { op: "list" });
+		expect(listed.content.find(part => part.type === "text")?.text ?? "").not.toContain("updatedAt");
+		expect(listed.details?.notes).toEqual([{ key: "server", text: "port 8123" }]);
+		expect(getImportantNotesFromEntries(manager.getBranch())[0]?.updatedAt).toBeDefined();
+	});
+
 	it("reopens durable notes after compaction and isolates fork updates from the original session", async () => {
 		using temp = TempDir.createSync("@oms-notes-resume-");
 		const cwd = temp.path();
@@ -339,9 +381,7 @@ describe("session important notes", () => {
 			const forkTool = new NotesTool(toolSession(forked));
 			await forkTool.execute("fork-edit", { op: "set", key: "server", text: "bun run dev --port 9000" });
 			expect(journalNotes(reopened.getBranch())).toEqual([{ key: "server", text: "bun run dev" }]);
-			expect(journalNotes(forked.getBranch())).toEqual([
-				{ key: "server", text: "bun run dev --port 9000" },
-			]);
+			expect(journalNotes(forked.getBranch())).toEqual([{ key: "server", text: "bun run dev --port 9000" }]);
 			await forkTool.execute("fork-clear", { op: "clear" });
 			const forkFile = forked.getSessionFile()!;
 			await forked.close();
@@ -460,7 +500,9 @@ describe("session important notes", () => {
 			expect(failed.isError).toBe(true);
 			expect(failed.content.find(part => part.type === "text")?.text).toContain("gated publish failure");
 			expect(failed.details?.notes).toEqual([{ key: "server", text: "committed", updatedAt: expect.any(String) }]);
-			expect((await listing).details?.notes).toEqual([{ key: "server", text: "committed", updatedAt: expect.any(String) }]);
+			expect((await listing).details?.notes).toEqual([
+				{ key: "server", text: "committed", updatedAt: expect.any(String) },
+			]);
 			expect(await Bun.file(file).text()).toBe(before);
 			const writeCount = writes.mock.calls.length;
 			await tool.execute("after-write", { op: "list" });
@@ -505,9 +547,7 @@ describe("session important notes", () => {
 			const reopened = await SessionManager.open(file, dir);
 			try {
 				expect(reopened.getEntries()).toHaveLength(before);
-				expect(journalNotes(reopened.getBranch(root))).toEqual([
-					{ key: "server", text: "ancestor" },
-				]);
+				expect(journalNotes(reopened.getBranch(root))).toEqual([{ key: "server", text: "ancestor" }]);
 			} finally {
 				await reopened.close();
 			}

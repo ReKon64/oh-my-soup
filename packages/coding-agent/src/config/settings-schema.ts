@@ -2763,7 +2763,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Session Notes",
 			label: "Note timestamps",
-			description: "Stamp each note with its last-update date and show it in lists and injected context",
+			description: "Show each note's last-update date in lists and injected context",
 		},
 	},
 	"notes.clearOnClear": {
@@ -2773,7 +2773,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Session Notes",
 			label: "Clear notes on /clear",
-			description: "Also wipe the session notes journal when /clear resets the conversation. Destructive: wiped notes cannot be recovered.",
+			description:
+				"Also wipe the session notes journal when /clear resets the conversation. Destructive: wiped notes cannot be recovered.",
 		},
 	},
 	"notes.injectAfterCompaction": {
@@ -2884,7 +2885,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Session Notes",
 			label: "Model-assisted search",
-			description: "Model role used by /notes search to find semantically matching notes beyond the regex pass; off disables the model pass",
+			description:
+				"Model role used by /notes search to find semantically matching notes beyond the regex pass; off disables the model pass",
 		},
 	},
 	"notes.autoUpdate": {
@@ -2904,7 +2906,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Session Notes",
 			label: "Update cadence (turns)",
-			description: "Assistant turns without a notes update before the nudge fires",
+			description: "Assistant turns between update nudges when no note has changed",
 			options: [
 				{ value: "5", label: "5 turns" },
 				{ value: "10", label: "10 turns" },
@@ -6728,22 +6730,22 @@ export type SettingPath = keyof Schema;
 export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boolean"; default: undefined }
 	? boolean | undefined
 	: Schema[P] extends { type: "boolean" }
-	? boolean
-	: Schema[P] extends { type: "string" }
-	? string | undefined
-	: Schema[P] extends { type: "number"; default: undefined }
-	? number | undefined
-	: Schema[P] extends { type: "number" }
-	? number
-	: Schema[P] extends { type: "enum"; values: infer V }
-	? V extends readonly string[]
-	? V[number]
-	: never
-	: Schema[P] extends { type: "array"; default: infer D }
-	? D
-	: Schema[P] extends { type: "record"; default: infer D }
-	? D
-	: never;
+		? boolean
+		: Schema[P] extends { type: "string" }
+			? string | undefined
+			: Schema[P] extends { type: "number"; default: undefined }
+				? number | undefined
+				: Schema[P] extends { type: "number" }
+					? number
+					: Schema[P] extends { type: "enum"; values: infer V }
+						? V extends readonly string[]
+							? V[number]
+							: never
+						: Schema[P] extends { type: "array"; default: infer D }
+							? D
+							: Schema[P] extends { type: "record"; default: infer D }
+								? D
+								: never;
 
 /** Get the default value for a setting path */
 export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {

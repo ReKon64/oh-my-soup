@@ -2,11 +2,19 @@ import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-soup/pi-ai/oauth";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
-import { formatNoteTimestamp, getImportantNotesFromEntries, IMPORTANT_NOTES_CUSTOM_TYPE, stripNoteControlChars, type ImportantNote } from "../session/important-notes";
+import {
+	formatNoteTimestamp,
+	getImportantNotesFromEntries,
+	stripNoteControlChars,
+	writeSessionNotes,
+	type ImportantNote,
+} from "../session/important-notes";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { completeSimple, retryTransientCompletion } from "@oh-my-soup/pi-ai";
-import { logger } from "@oh-my-soup/pi-utils";
+import { logger, prompt } from "@oh-my-soup/pi-utils";
 import { collectOnlineTinyCandidates } from "../tiny/online-candidates";
+import searchNotesTemplate from "../prompts/system/important-notes-search.md" with { type: "text" };
+import searchNotesInputTemplate from "../prompts/system/important-notes-search-input.md" with { type: "text" };
 import { findBeadsWorkspaceRoot, NativeBeadsRepository } from "../beads/repository";
 import { buildNotesArgumentCompletions, NOTES_SUBCOMMANDS } from "./builtin-completions";
 
@@ -40,11 +48,11 @@ import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 const NOTES_MODEL_SEARCH_TIMEOUT_MS = 20_000;
 
 /**
-	* Ask the configured search model (notes.searchModel — a model role like
-	* "smol") which saved notes are relevant to the query. The role resolves
-	* through the tiny-candidate chain; returns the keys the model picked, or
-	* throws — the caller keeps its regex results either way.
-	*/
+ * Ask the configured search model (notes.searchModel — a model role like
+ * "smol") which saved notes are relevant to the query. The role resolves
+ * through the tiny-candidate chain; returns the keys the model picked, or
+ * throws — the caller keeps its regex results either way.
+ */
 async function searchNotesWithModel(
 	runtime: SlashCommandRuntime,
 	notes: readonly ImportantNote[],
@@ -55,10 +63,17 @@ async function searchNotesWithModel(
 	const sessionId = runtime.sessionManager.getSessionId();
 	const candidates = collectOnlineTinyCandidates([roleModel], runtime.settings, registry.getAvailable());
 	if (candidates.length === 0) throw new Error(`no model resolved for "${roleModel}"`);
-	const listing = notes.map((note, index) => `${index + 1}. ${note.key}: ${note.text}`).join("\n");
-	const systemPrompt =
-		'You filter saved session notes. Reply ONLY with a JSON array of the note keys relevant to the query, e.g. ["key1","key2"]. Use keys exactly as given. Reply [] when none are relevant.';
-	const userMessage = `Query: ${query}\n\nNotes:\n${listing}`;
+	// The search role and its fallback chain may route to a different provider
+	// from the active session. Protect every outbound string before JSON escaping;
+	// numeric labels keep raw (or redacted) keys out of the response mapping.
+	const obfuscator = runtime.session.obfuscator;
+	const listing = notes.map((note, index) => ({ number: index + 1, key: note.key, text: note.text }));
+	const redacted = obfuscator?.obfuscateObject(listing) ?? listing;
+	const redactedQuery = obfuscator?.obfuscate(query) ?? query;
+	const userMessage = prompt.render(searchNotesInputTemplate, {
+		queryJson: JSON.stringify(redactedQuery).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e"),
+		notesJson: JSON.stringify(redacted).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e"),
+	});
 	// Honor host cancellation (TUI escape, ACP/RPC abort) alongside the hard
 	// ceiling — whichever fires first.
 	const signal = runtime.signal
@@ -70,7 +85,10 @@ async function searchNotesWithModel(
 				() =>
 					completeSimple(
 						candidate.model,
-						{ systemPrompt: [systemPrompt], messages: [{ role: "user", content: userMessage, timestamp: Date.now() }] },
+						{
+							systemPrompt: [searchNotesTemplate],
+							messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+						},
 						{
 							apiKey: registry.resolver(candidate.model, sessionId),
 							sessionId,
@@ -90,7 +108,12 @@ async function searchNotesWithModel(
 			if (start < 0 || end <= start) continue;
 			const parsed: unknown = JSON.parse(text.slice(start, end + 1));
 			if (!Array.isArray(parsed)) continue;
-			const keys = parsed.filter((key): key is string => typeof key === "string");
+			const keys = parsed
+				.filter(
+					(number): number is number =>
+						typeof number === "number" && Number.isInteger(number) && number >= 1 && number <= notes.length,
+				)
+				.map(number => notes[number - 1]!.key);
 			if (keys.length > 0 || response.stopReason === "stop") return keys;
 		} catch (error) {
 			logger.debug("notes: model search attempt failed", {
@@ -134,11 +157,11 @@ async function handleUsageResetCommand(
 		wanted === "active"
 			? accounts.find(account => account.active)
 			: accounts.find(
-				account =>
-					account.label.toLowerCase() === wanted ||
-					account.target.email?.toLowerCase() === wanted ||
-					account.target.accountId?.toLowerCase() === wanted,
-			);
+					account =>
+						account.label.toLowerCase() === wanted ||
+						account.target.email?.toLowerCase() === wanted ||
+						account.target.accountId?.toLowerCase() === wanted,
+				);
 	if (!target) {
 		await output(`No Codex account matches "${targetArg}".`);
 		return;
@@ -899,7 +922,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "notes",
 		icon: "notepad",
 		description:
-			"Session notes: show (with dates), inject the reference into the next request, both, search by text/regex (also Beads project notes), edit a note in your external editor, or clear the journal (destructive). A bare <key> after show/both prints just that note.",
+			"Session notes: show (dates when enabled), inject the reference into the next request, both, search by text/regex (also Beads project notes), edit a note in your external editor, or clear the journal (destructive). A bare <key> after show/both prints just that note.",
 		acpDescription: "Show, inject, search, edit, or clear session notes (search includes Beads project notes)",
 		inlineHint: "[show|inject|both|search] [<key|pattern>]",
 		subcommands: NOTES_SUBCOMMANDS,
@@ -912,10 +935,12 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const rest = spaceIndex === -1 ? "" : raw.slice(spaceIndex + 1).trim();
 			const notes = getImportantNotesFromEntries(runtime.sessionManager.getBranch());
 
+			const showTimestamps = runtime.settings.get("notes.timestamps");
+			const safeKey = (key: string) => stripNoteControlChars(key).replace(/\n/g, "");
 			const renderNotes = (selected: readonly ImportantNote[]): string => {
 				const lines = selected.map(note => {
-					const stamp = note.updatedAt ? ` (${formatNoteTimestamp(note.updatedAt)})` : "";
-					return `- ${note.key}${stamp}: ${note.text}`;
+					const stamp = showTimestamps && note.updatedAt ? ` (${formatNoteTimestamp(note.updatedAt)})` : "";
+					return `- ${safeKey(note.key)}${stamp}: ${note.text}`;
 				});
 				return `Session notes (${selected.length}):\n${lines.join("\n")}`;
 			};
@@ -977,21 +1002,33 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				} catch {
 					// Beads unavailable (not initialized, locked, incompatible) — session search stands alone.
 				}
-				await runtime.output(safeNotesOutput(
-					matches.length === 0 && !beadsSection
-						? `No notes match "${rest}".`
-						: `${matches.length} matching session note(s)${modelNote}:\n${renderNotes(matches)}${beadsSection}`,
-				));
+				await runtime.output(
+					safeNotesOutput(
+						matches.length === 0 && !beadsSection
+							? `No notes match "${rest}".`
+							: `${matches.length} matching session note(s)${modelNote}:\n${renderNotes(matches)}${beadsSection}`,
+					),
+				);
 				return commandConsumed();
 			}
 
 			if (verb === "clear") {
 				if (rest !== "confirm") {
-					await runtime.output(safeNotesOutput('This wipes every session note and cannot be recovered. Run "/notes clear confirm" to proceed.'));
+					await runtime.output(
+						safeNotesOutput(
+							'This wipes every session note and cannot be recovered. Run "/notes clear confirm" to proceed.',
+						),
+					);
 					return commandConsumed();
 				}
-				runtime.sessionManager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, { version: 2, op: "clear" });
-				await runtime.output("Session notes cleared.");
+				try {
+					await writeSessionNotes(runtime.sessionManager, { op: "clear" });
+					await runtime.output("Session notes cleared.");
+				} catch (error) {
+					await runtime.output(
+						safeNotesOutput(`Failed to clear notes: ${error instanceof Error ? error.message : String(error)}`),
+					);
+				}
 				return commandConsumed();
 			}
 
@@ -1006,22 +1043,32 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					await runtime.output(safeNotesOutput(`Note not found: ${rest}. Use /notes to list every note.`));
 					return commandConsumed();
 				}
+				const owner = {
+					sessionId: runtime.sessionManager.getSessionId(),
+					branchGeneration: runtime.sessionManager.getBranchGeneration(),
+					previousText: hit.text,
+				};
 				const editorCmd = getEditorCommand();
 				const ui = runtime.ctx?.ui;
 				if (!editorCmd || !ui) {
-					await runtime.output("Editing notes requires the interactive TUI with an editor configured (VISUAL/EDITOR).");
+					await runtime.output(
+						"Editing notes requires the interactive TUI with an editor configured (VISUAL/EDITOR).",
+					);
 					return commandConsumed();
 				}
-				await ui.stop();
+				ui.stop();
 				let edited: string | null = null;
 				let editorError: string | undefined;
 				try {
-					edited = await openInEditor(editorCmd, hit.text, { extension: ".oms-note.md" });
+					edited = await openInEditor(editorCmd, hit.text, {
+						extension: ".oms-note.md",
+						trimTrailingNewline: false,
+					});
 				} catch (error) {
 					editorError = error instanceof Error ? error.message : String(error);
 				} finally {
 					ui.start();
-					ui.requestRender?.();
+					ui.requestRender?.(true);
 				}
 				if (editorError !== undefined) {
 					await runtime.output(safeNotesOutput(`Failed to open external editor: ${editorError}`));
@@ -1035,20 +1082,23 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					await runtime.output(safeNotesOutput(`Note ${key} unchanged.`));
 					return commandConsumed();
 				}
-				runtime.sessionManager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, {
-					version: 2,
-					op: "set",
-					key: hit.key,
-					text: edited,
-					at: new Date().toISOString(),
-				});
+				try {
+					await writeSessionNotes(runtime.sessionManager, { op: "set", key: hit.key, text: edited }, owner);
+				} catch (error) {
+					await runtime.output(
+						safeNotesOutput(`Note not updated: ${error instanceof Error ? error.message : String(error)}`),
+					);
+					return commandConsumed();
+				}
 				await runtime.output(safeNotesOutput(`Note ${key} updated.`));
 				return commandConsumed();
 			}
 
 			if (verb !== "show" && verb !== "inject" && verb !== "both") {
 				await runtime.output(
-					safeNotesOutput(`Unknown /notes verb "${verb}". Use show, inject, both, or search — e.g. "/notes show <key>" prints one note by its key.`),
+					safeNotesOutput(
+						`Unknown /notes verb "${verb}". Use show, inject, both, or search — e.g. "/notes show <key>" prints one note by its key.`,
+					),
 				);
 				return commandConsumed();
 			}
@@ -1063,7 +1113,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						await runtime.output(safeNotesOutput(`Note not found: ${rest}. Use /notes to list every note.`));
 						return commandConsumed();
 					}
-					parts.push(`Session note ${rest}:\n- ${hit.key}${hit.updatedAt ? ` (${formatNoteTimestamp(hit.updatedAt)})` : ""}: ${hit.text}`);
+					parts.push(
+						`Session note ${safeKey(hit.key)}:\n- ${safeKey(hit.key)}${showTimestamps && hit.updatedAt ? ` (${formatNoteTimestamp(hit.updatedAt)})` : ""}: ${hit.text}`,
+					);
 				} else {
 					parts.push(
 						notes.length === 0

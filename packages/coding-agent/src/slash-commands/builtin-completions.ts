@@ -32,7 +32,11 @@ export function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix:
 
 /** Single source for the /notes verb contract: dropdown, ACP advertising, and handler validation. */
 export const NOTES_SUBCOMMANDS: SubcommandDef[] = [
-	{ name: "show", description: "Print notes with dates; add a key to print just that note", usage: "[<key>]" },
+	{
+		name: "show",
+		description: "Print notes (dates when enabled); add a key to print just that note",
+		usage: "[<key>]",
+	},
 	{ name: "inject", description: "Re-attach the notes reference to the next request, without printing" },
 	{ name: "both", description: "Print notes and re-attach the reference to the next request", usage: "[<key>]" },
 	{ name: "search", description: "Search note keys and contents by text or regex", usage: "<pattern>" },
@@ -41,10 +45,10 @@ export const NOTES_SUBCOMMANDS: SubcommandDef[] = [
 ];
 
 /**
-	* /notes argument completions: subcommands before the first space, then note
-	* keys for `show`/`both` (free-form for `search`). Keys come from the live
-	* session journal, so fresh notes autocomplete immediately.
-	*/
+ * /notes argument completions: subcommands before the first space, then note
+ * keys for `show`/`both` (free-form for `search`). Keys come from the live
+ * session journal, so fresh notes autocomplete immediately.
+ */
 export function buildNotesArgumentCompletions(
 	runtime: TuiSlashCommandRuntime,
 ): (prefix: string) => AutocompleteItem[] | null {
@@ -61,8 +65,8 @@ export function buildNotesArgumentCompletions(
 		const matches = notes
 			.filter(note => note.key.toLowerCase().includes(keyPrefix))
 			.map(note => ({
-				value: stripNoteControlChars(`${verb} ${note.key}`),
-				label: stripNoteControlChars(note.key),
+				value: `${verb} ${stripNoteControlChars(note.key).replace(/\n/g, "")}`,
+				label: stripNoteControlChars(note.key).replace(/\n/g, ""),
 				description: stripNoteControlChars(note.text.length > 80 ? `${note.text.slice(0, 77)}...` : note.text),
 			}));
 		return matches.length > 0 ? matches : null;

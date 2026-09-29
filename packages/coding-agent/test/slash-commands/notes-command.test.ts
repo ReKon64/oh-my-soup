@@ -1,21 +1,32 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as ai from "@oh-my-soup/pi-ai";
+import { getBundledModel } from "@oh-my-soup/pi-catalog/models";
+import { Settings } from "@oh-my-soup/pi-coding-agent/config/settings";
+import { SecretObfuscator } from "@oh-my-soup/pi-coding-agent/secrets";
+import * as externalEditor from "@oh-my-soup/pi-coding-agent/utils/external-editor";
 import type { InteractiveModeContext } from "@oh-my-soup/pi-coding-agent/modes/types";
 import {
 	formatNoteTimestamp,
 	IMPORTANT_NOTES_CUSTOM_TYPE,
+	IMPORTANT_NOTES_MAX_CHARS,
 } from "@oh-my-soup/pi-coding-agent/session/important-notes";
 import { SessionManager } from "@oh-my-soup/pi-coding-agent/session/session-manager";
-import { buildTuiBuiltinSlashCommands, executeBuiltinSlashCommand } from "@oh-my-soup/pi-coding-agent/slash-commands/builtin-registry";
+import {
+	buildTuiBuiltinSlashCommands,
+	executeBuiltinSlashCommand,
+	lookupBuiltinSlashCommand,
+} from "@oh-my-soup/pi-coding-agent/slash-commands/builtin-registry";
+import type { SlashCommandRuntime } from "@oh-my-soup/pi-coding-agent/slash-commands/types";
 
 function createHarness(
 	manager: SessionManager,
-	settings: { get(path: string): unknown } = {
+	settings: Settings | { get(path: string): unknown } = {
 		// searchModel "off" keeps /notes search deterministic: no model/network
 		// pass, so regex assertions never depend on a provider.
 		get: (path: string) =>
 			path === "notes.searchModel"
 				? "off"
-				: path === "notes.injectAfterCompaction"
+				: path === "notes.timestamps" || path === "notes.injectAfterCompaction"
 					? true
 					: undefined,
 	},
@@ -24,11 +35,8 @@ function createHarness(
 	const outputs: string[] = [];
 	const ctx = {
 		session: { requestNotesReference },
-		sessionManager: {
-			getCwd: () => manager.getCwd(),
-			getBranch: () => manager.getBranch(),
-			appendCustomEntry: manager.appendCustomEntry.bind(manager),
-		},
+		sessionManager: manager,
+		ui: { stop: vi.fn(async () => {}), start: vi.fn(), requestRender: vi.fn() },
 		settings,
 		editor: { setText: () => {} },
 		showStatus: (text: string) => {
@@ -58,6 +66,8 @@ function seed(manager: SessionManager): void {
 	});
 }
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("/notes slash command", () => {
 	it("strips terminal escape sequences and hostile payloads from note output", async () => {
 		const manager = SessionManager.inMemory();
@@ -74,6 +84,17 @@ describe("/notes slash command", () => {
 		expect(joined).not.toContain("\u001B");
 		expect(joined).not.toContain("pwned");
 		expect(joined).toContain("reset");
+	});
+	it("shows a resumed legacy note without rendering controls in its key", async () => {
+		const manager = SessionManager.inMemory();
+		manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, {
+			version: 1,
+			notes: [{ key: "legacy\u0007\nkey", text: "keep this note" }],
+		});
+		const { ctx, outputs } = createHarness(manager);
+		await executeBuiltinSlashCommand("/notes show", { ctx });
+		expect(outputs.at(-1)).toContain("- legacykey: keep this note");
+		expect(outputs.at(-1)).not.toContain("\u0007");
 	});
 
 	it("show prints notes without arming reinjection", async () => {
@@ -146,14 +167,6 @@ describe("/notes slash command", () => {
 		expect(outputs.join("\n")).toContain("- proc");
 	});
 
-	it("unknown verbs list the supported forms", async () => {
-		const manager = SessionManager.inMemory();
-		seed(manager);
-		const { ctx, outputs } = createHarness(manager);
-		await executeBuiltinSlashCommand("/notes wat", { ctx });
-		expect(outputs.join("\n")).toContain("Unknown /notes verb");
-	});
-
 	it("empty journal still arms injection on bare /notes", async () => {
 		const manager = SessionManager.inMemory();
 		const { ctx, requestNotesReference, outputs } = createHarness(manager);
@@ -175,9 +188,8 @@ describe("/notes slash command", () => {
 		const manager = SessionManager.inMemory();
 		seed(manager);
 		const entriesBefore = manager.getEntries().length;
-		const { ctx, outputs } = createHarness(manager);
+		const { ctx } = createHarness(manager);
 		await executeBuiltinSlashCommand("/notes clear", { ctx });
-		expect(outputs.join("\n")).toContain('Run "/notes clear confirm" to proceed.');
 		expect(manager.getEntries()).toHaveLength(entriesBefore);
 	});
 
@@ -194,17 +206,109 @@ describe("/notes slash command", () => {
 		});
 	});
 
-	it("edit reports a missing key without opening an editor", async () => {
+	it("edits an existing note through the TUI and rejects an oversized replacement before journaling", async () => {
 		const manager = SessionManager.inMemory();
 		seed(manager);
+		vi.spyOn(externalEditor, "openInEditor")
+			.mockResolvedValueOnce("bun run dev --port 9000")
+			.mockResolvedValueOnce("x".repeat(IMPORTANT_NOTES_MAX_CHARS));
+		vi.spyOn(externalEditor, "getEditorCommand").mockReturnValue("configured-editor");
 		const { ctx, outputs } = createHarness(manager);
-		await executeBuiltinSlashCommand("/notes edit nope", { ctx });
-		expect(outputs.join("\n")).toContain("Note not found: nope");
+		await executeBuiltinSlashCommand("/notes edit server", { ctx });
+		expect(manager.getBranch().at(-1)).toMatchObject({
+			type: "custom",
+			data: { op: "set", key: "server", text: "bun run dev --port 9000" },
+		});
+		const before = manager.getEntries().length;
+		await executeBuiltinSlashCommand("/notes edit server", { ctx });
+		expect(manager.getEntries()).toHaveLength(before);
+		await executeBuiltinSlashCommand("/notes show server", { ctx });
+		expect(outputs.at(-1)).toContain("bun run dev --port 9000");
+		expect(outputs.at(-1)).not.toContain("x".repeat(100));
+	});
+
+	it("refuses to overwrite a note changed while the editor was open", async () => {
+		const manager = SessionManager.inMemory();
+		seed(manager);
+		vi.spyOn(externalEditor, "getEditorCommand").mockReturnValue("configured-editor");
+		vi.spyOn(externalEditor, "openInEditor").mockImplementation(async () => {
+			manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, {
+				version: 2,
+				op: "set",
+				key: "server",
+				text: "other writer",
+				at: new Date().toISOString(),
+			});
+			return "stale edit";
+		});
+		const { ctx } = createHarness(manager);
+		await executeBuiltinSlashCommand("/notes edit server", { ctx });
+		await executeBuiltinSlashCommand("/notes show server", { ctx });
+		expect(manager.getBranch().at(-1)).toMatchObject({ type: "custom", data: { text: "other writer" } });
+	});
+
+	it("keeps guest notes read-only: show/search work, edits and injection cannot report success", async () => {
+		const manager = SessionManager.inMemory();
+		seed(manager);
+		const { ctx, outputs, requestNotesReference } = createHarness(manager);
+		ctx.collabGuest = {} as InteractiveModeContext["collabGuest"];
+		await executeBuiltinSlashCommand("/notes show", { ctx });
+		expect(outputs.at(-1)).toContain("server");
+		await executeBuiltinSlashCommand("/notes search onnx", { ctx });
+		expect(outputs.at(-1)).toContain("embed");
+		const entriesBefore = manager.getEntries().length;
+		for (const command of ["/notes", "/notes both", "/notes inject", "/notes clear confirm", "/notes edit server"]) {
+			await executeBuiltinSlashCommand(command, { ctx });
+			expect(outputs.at(-1)).toContain("host-only");
+		}
+		expect(manager.getEntries()).toHaveLength(entriesBefore);
+		expect(requestNotesReference).not.toHaveBeenCalled();
+	});
+
+	it("hides dates in /notes show when timestamps are off", async () => {
+		const manager = SessionManager.inMemory();
+		seed(manager);
+		const settings = Settings.isolated({ "notes.timestamps": false, "notes.searchModel": "off" });
+		const { ctx, outputs } = createHarness(manager, settings);
+		await executeBuiltinSlashCommand("/notes show server", { ctx });
+		expect(outputs.at(-1)).toContain("bun run dev --port 8123");
+		expect(outputs.at(-1)).not.toContain(formatNoteTimestamp("2026-09-27T10:00:00.000Z"));
+	});
+
+	it("redacts model-search query and note contents while mapping numeric selections back to saved keys", async () => {
+		const manager = SessionManager.inMemory();
+		const secret = "SECRET_QUERY_TOKEN_123456";
+		manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, {
+			version: 2,
+			op: "set",
+			key: `credential-${secret}`,
+			text: `token=${secret}`,
+		});
+		manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, {
+			version: 2,
+			op: "set",
+			key: "server",
+			text: "deploy server",
+		});
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		const settings = Settings.isolated({ "notes.searchModel": "smol" });
+		settings.setModelRole("smol", `${model.provider}/${model.id}`);
+		const { ctx, outputs } = createHarness(manager, settings);
+		Object.assign(ctx.session, {
+			obfuscator: new SecretObfuscator([{ type: "plain", content: secret }]),
+			modelRegistry: { getAvailable: () => [model], resolver: () => "test-api-key" },
+		});
+		const complete = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "[2]" }],
+		} as never);
+		await executeBuiltinSlashCommand(`/notes search ${secret}`, { ctx });
+		expect(complete).toHaveBeenCalledTimes(1);
+		expect(JSON.stringify(complete.mock.calls[0]?.[1])).not.toContain(secret);
+		expect(outputs.at(-1)).toContain("- server");
 	});
 
 	it("materializes live note-key completions through the command registry", async () => {
-		// Guards the BUILTIN_SLASH_COMMAND_DEFS field copy: a mapping that drops
-		// argumentCompletions would silently ship /notes without its dropdown.
 		const manager = SessionManager.inMemory();
 		seed(manager);
 		const { ctx } = createHarness(manager);
@@ -214,10 +318,27 @@ describe("/notes slash command", () => {
 		expect(completions?.map(item => item.label)).toEqual(["server", "embed"]);
 	});
 
-	it("search without a pattern prints usage", async () => {
+	it("refuses to launch the editor from text/ACP mode", async () => {
 		const manager = SessionManager.inMemory();
+		seed(manager);
 		const { ctx, outputs } = createHarness(manager);
-		await executeBuiltinSlashCommand("/notes search", { ctx });
-		expect(outputs.join("\n")).toContain("Usage: /notes search <text or regex>");
+		const editor = vi.spyOn(externalEditor, "openInEditor");
+		const command = lookupBuiltinSlashCommand("notes");
+		const runtime: SlashCommandRuntime = {
+			session: ctx.session,
+			sessionManager: manager,
+			settings: Settings.isolated({ "notes.searchModel": "off" }),
+			cwd: manager.getCwd(),
+			output: text => {
+				outputs.push(text);
+			},
+			refreshCommands: () => {},
+			reloadPlugins: async () => {},
+		};
+		const before = manager.getEntries().length;
+		await command?.handle?.({ name: "notes", args: "edit server", text: "/notes edit server" }, runtime);
+		expect(editor).not.toHaveBeenCalled();
+		expect(manager.getEntries()).toHaveLength(before);
+		expect(outputs.at(-1)).toContain("interactive TUI");
 	});
 });

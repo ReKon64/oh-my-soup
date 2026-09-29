@@ -475,9 +475,15 @@ describe("important notes request projection", () => {
 		nudged.acknowledgeDelivery();
 		// Same counter, already nudged: quiet.
 		expect(nudges(context.transform([], opts()).messages)).toHaveLength(0);
-		// One more turn without a mutation: nudge again.
+		// Acknowledgement starts a fresh two-turn interval, not a nudge every turn.
 		manager.appendMessage(createAssistantMessage("turn 3"));
+		expect(nudges(context.transform([], opts()).messages)).toHaveLength(0);
+		manager.appendMessage(createAssistantMessage("turn 4"));
+		const next = context.transform([], opts());
+		expect(nudges(next.messages)).toHaveLength(1);
 		expect(nudges(context.transform([], opts()).messages)).toHaveLength(1);
+		next.acknowledgeDelivery();
+		expect(nudges(context.transform([], opts()).messages)).toHaveLength(0);
 		// A notes mutation resets the counter: the nudge goes quiet.
 		manager.appendCustomEntry(IMPORTANT_NOTES_CUSTOM_TYPE, {
 			version: 2,
@@ -487,6 +493,9 @@ describe("important notes request projection", () => {
 			at: "2026-09-27T13:44:22.000Z",
 		});
 		expect(nudges(context.transform([], opts()).messages)).toHaveLength(0);
+		manager.appendMessage(createAssistantMessage("after mutation 1"));
+		manager.appendMessage(createAssistantMessage("after mutation 2"));
+		expect(nudges(context.transform([], opts()).messages)).toHaveLength(1);
 	});
 
 	it("injects on token-threshold and window-percent crossings once per episode", () => {

@@ -503,9 +503,7 @@ describe("SDK important notes requests", () => {
 			expect(mock.calls).toHaveLength(2);
 			// The mid-turn compaction is a new boundary, so the continuation
 			// reinjects the reference with the just-saved snapshot, timestamps on.
-			expect(noteData(mock.calls[1].context)).toEqual([
-				[{ key: "evidence", text, updatedAt: expect.any(String) }],
-			]);
+			expect(noteData(mock.calls[1].context)).toEqual([[{ key: "evidence", text, updatedAt: expect.any(String) }]]);
 			for (const call of mock.calls) {
 				const sentTokens =
 					session.agent.tokenizer.countMessages(call.context.messages, { excludeEncryptedReasoning: true }) +
@@ -619,20 +617,14 @@ describe("SDK important notes requests", () => {
 				contextWindow -
 				compaction.resolveBudgetReserveTokens(contextWindow, session.settings.getGroup("compaction"));
 			expect(session.getContextUsage()!.tokens!).toBeGreaterThan(budget);
-			// Compaction fully unavailable: the only recovery left is reclaiming
-			// the oversized tool result. The recovery ladder budgets the reference
-			// only once a primary transform has recorded its size, so run one
-			// warmup request first; the target request then re-arms the one-shot
-			// reinjection so the trimmed request still carries the exact reference.
+			// The first request must reclaim tool output while retaining its injected note.
 			const compactSpy = vi.spyOn(compaction, "compact");
 			const mock = createMockModel({ provider: model.provider, id: model.id, handler: { content: ["done"] } });
 			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
-			await session.prompt("Warm up.");
-			session.requestNotesReference();
 			await session.prompt("Summarize the findings.");
 			expect(compactSpy).not.toHaveBeenCalled();
-			expect(mock.calls).toHaveLength(2);
-			const target = mock.calls[1];
+			expect(mock.calls).toHaveLength(1);
+			const target = mock.calls[0];
 			expect(JSON.stringify(target.context.messages)).not.toContain("match line");
 			expect(noteData(target.context)).toEqual([notes]);
 			const sentTokens =
