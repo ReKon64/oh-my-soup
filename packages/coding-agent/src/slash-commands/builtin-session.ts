@@ -16,7 +16,7 @@ import {
 	renderChangelogEntries,
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
-import type { ConfiguredThinkingLevel } from "@oh-my-soup/pi-tui/thinking";
+import { parseConfiguredThinkingLevel } from "@oh-my-soup/pi-tui/thinking";
 import { buildThinkingLevelCompletions } from "./builtin-completions";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "@oh-my-soup/pi-tui/chrome/format";
@@ -832,26 +832,36 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		argumentCompletions: buildThinkingLevelCompletions,
 		handle: async (command, runtime) => {
-			const available: readonly string[] = runtime.session.getAvailableThinkingLevels();
-			const level = command.args.trim().toLowerCase();
-			if (!level) {
-				const current = runtime.session.thinkingLevel ?? "model default";
+			const selector = command.args.trim().toLowerCase();
+			if (!selector) {
+				const available = runtime.session.getAvailableThinkingLevels();
+				const availableText = `off, auto${available.length ? `, ${available.join(", ")}` : ""}`;
+				const current = runtime.session.configuredThinkingLevel() ?? "model default";
+				const reasoningNote =
+					runtime.session.model?.reasoning === false ? " Current model does not support reasoning." : "";
 				await runtime.output(
-					`Current thinking level: ${current}. Available: off, auto, ${available.join(", ")}. Use /thinking <level>.`,
+					`Current thinking level: ${current}. Available: ${availableText}. Use /thinking <level>.${reasoningNote}`,
 				);
 				return commandConsumed();
 			}
+			const level = parseConfiguredThinkingLevel(selector);
 			if (level === "off") {
 				runtime.session.setThinkingLevel("off", false);
 				await runtime.output("Thinking disabled.");
 				return commandConsumed();
 			}
-			if (level !== "auto" && !available.includes(level)) {
-				await runtime.output(`Unknown thinking level "${level}". Available: off, auto, ${available.join(", ")}.`);
+			if (level === "auto") {
+				runtime.session.setThinkingLevel("auto", false);
+				await runtime.output("Thinking level set to auto.");
 				return commandConsumed();
 			}
-			// Level validated against the model's available efforts above.
-			runtime.session.setThinkingLevel(level as ConfiguredThinkingLevel, false);
+			const available = runtime.session.getAvailableThinkingLevels();
+			if (!level || level === "inherit" || !available.includes(level)) {
+				const availableText = `off, auto${available.length ? `, ${available.join(", ")}` : ""}`;
+				await runtime.output(`Unknown thinking level "${selector}". Available: ${availableText}.`);
+				return commandConsumed();
+			}
+			runtime.session.setThinkingLevel(level, false);
 			await runtime.output(`Thinking level set to ${level}.`);
 			return commandConsumed();
 		},

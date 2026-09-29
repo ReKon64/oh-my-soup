@@ -25,7 +25,7 @@ export interface BuiltinSlashCommand {
 	/** Subcommands for dropdown completion (e.g. /mcp add, /mcp list). */
 	subcommands?: SubcommandDef[];
 	/** Runtime-scoped argument completions; overrides the declarative `subcommands` completion (e.g. live session state: note keys, model thinking levels). */
-	argumentCompletions?: (runtime: TuiSlashCommandRuntime) => ((prefix: string) => AutocompleteItem[] | null);
+	argumentCompletions?: (runtime: TuiSlashCommandRuntime) => (prefix: string) => AutocompleteItem[] | null;
 	/** Static inline hint when command takes a simple argument (no subcommands). */
 	inlineHint?: string;
 	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
@@ -150,11 +150,11 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 	 * `noConfusingVoidType` also rejects).
 	 */
 	handle?:
-	| ((
-		command: ParsedSlashCommand,
-		runtime: SlashCommandRuntime,
-	) => SlashCommandResult | Promise<SlashCommandResult>)
-	| ((command: ParsedSlashCommand, runtime: SlashCommandRuntime) => void | Promise<void>);
+		| ((
+				command: ParsedSlashCommand,
+				runtime: SlashCommandRuntime,
+		  ) => SlashCommandResult | Promise<SlashCommandResult>)
+		| ((command: ParsedSlashCommand, runtime: SlashCommandRuntime) => void | Promise<void>);
 	/**
 	 * TUI-only handler that supersedes `handle` when both are present. Use for
 	 * selectors, wizards, dashboards, and anything else that requires
@@ -162,11 +162,11 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 	 * function-type union shape.
 	 */
 	handleTui?:
-	| ((
-		command: ParsedSlashCommand,
-		runtime: TuiSlashCommandRuntime,
-	) => SlashCommandResult | Promise<SlashCommandResult>)
-	| ((command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime) => void | Promise<void>);
+		| ((
+				command: ParsedSlashCommand,
+				runtime: TuiSlashCommandRuntime,
+		  ) => SlashCommandResult | Promise<SlashCommandResult>)
+		| ((command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime) => void | Promise<void>);
 }
 
 /** Result returned by `executeAcpBuiltinSlashCommand`. */

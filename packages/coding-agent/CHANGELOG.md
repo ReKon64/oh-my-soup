@@ -4,7 +4,7 @@
 
 ### Added
 
-- `/thinking [<level>]` command: show the session model's current thinking level, set a specific level, or turn thinking off — validated against the live model's available efforts, with argument autocomplete. Complements the `Shift+Tab` level cycler with direct in-chat selection.
+- Added `/thinking [<level>]` to show the configured thinking selector or set auto, off, or a model-supported effort directly, with argument completion. ([#8](https://github.com/pickpocket/oh-my-soup/pull/8) by [@ReKon64](https://github.com/ReKon64))
 
 ## [18.4.3] - 2026-09-22
 
