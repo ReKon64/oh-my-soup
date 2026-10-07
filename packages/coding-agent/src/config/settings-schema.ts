@@ -121,7 +121,7 @@ export {
 	type StatusLineSeparatorStyle,
 } from "@oh-my-soup/pi-tui/status-line/schema";
 
-interface UiBoolean extends UiBase {}
+interface UiBoolean extends UiBase { }
 
 interface UiEnum<T extends readonly string[]> extends UiBase {
 	/** Submenu options. When omitted, the enum renders as an inline toggle derived from `values`. */
@@ -2891,6 +2891,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Session Notes",
 			label: "Auto-update nudges",
 			description: "Nudge the model to update its notes as the last action of a turn",
+		},
+	},
+	"notes.collapseFrames": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Session Notes",
+			label: "Collapse notes frames",
+			description:
+				"Collapse the injected notes reference/reminder frames to a one-line summary in the transcript; Ctrl+O expands",
 		},
 	},
 	"notes.autoUpdateCadence": {
@@ -6687,22 +6698,22 @@ export type SettingPath = keyof Schema;
 export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boolean"; default: undefined }
 	? boolean | undefined
 	: Schema[P] extends { type: "boolean" }
-		? boolean
-		: Schema[P] extends { type: "string" }
-			? string | undefined
-			: Schema[P] extends { type: "number"; default: undefined }
-				? number | undefined
-				: Schema[P] extends { type: "number" }
-					? number
-					: Schema[P] extends { type: "enum"; values: infer V }
-						? V extends readonly string[]
-							? V[number]
-							: never
-						: Schema[P] extends { type: "array"; default: infer D }
-							? D
-							: Schema[P] extends { type: "record"; default: infer D }
-								? D
-								: never;
+	? boolean
+	: Schema[P] extends { type: "string" }
+	? string | undefined
+	: Schema[P] extends { type: "number"; default: undefined }
+	? number | undefined
+	: Schema[P] extends { type: "number" }
+	? number
+	: Schema[P] extends { type: "enum"; values: infer V }
+	? V extends readonly string[]
+	? V[number]
+	: never
+	: Schema[P] extends { type: "array"; default: infer D }
+	? D
+	: Schema[P] extends { type: "record"; default: infer D }
+	? D
+	: never;
 
 /** Get the default value for a setting path */
 export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {

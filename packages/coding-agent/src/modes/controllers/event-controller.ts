@@ -16,6 +16,7 @@ import {
 } from "@oh-my-soup/pi-tui/chat/read-tool-group";
 import { TodoReminderComponent } from "@oh-my-soup/pi-tui/chat/todo-reminder";
 import { isNativeRendering } from "@oh-my-soup/pi-tui/native/state";
+import { notesFrameKind } from "@oh-my-soup/pi-tui/chat/user-message";
 import { textContent } from "@oh-my-soup/pi-tui/chat/transcript-entry";
 import {
 	ToolExecutionComponent,
@@ -300,11 +301,11 @@ export class EventController {
 		vocalizer.setEnhancer(
 			session?.modelRegistry && session.agent && session.settings
 				? new SpeechEnhancer({
-						settings: session.settings,
-						registry: session.modelRegistry,
-						sessionId: session.sessionId,
-						metadataResolver: provider => session.agent.metadataForProvider(provider),
-					})
+					settings: session.settings,
+					registry: session.modelRegistry,
+					sessionId: session.sessionId,
+					metadataResolver: provider => session.agent.metadataForProvider(provider),
+				})
 				: null,
 		);
 		this.#streamingReveal = new StreamingRevealController({
@@ -320,7 +321,7 @@ export class EventController {
 		this.#handlers = {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_end: e => this.#handleAgentEnd(e),
-			turn_start: async () => {},
+			turn_start: async () => { },
 			turn_end: async e => this.#handleTurnEnd(e),
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
@@ -340,8 +341,8 @@ export class EventController {
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
-			cache_warming_start: async () => {},
-			cache_warming_end: async () => {},
+			cache_warming_start: async () => { },
+			cache_warming_end: async () => { },
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
@@ -356,7 +357,7 @@ export class EventController {
 			},
 			// Header rebuild is owned by InteractiveMode's own session
 			// subscription (mirrors model_changed); nothing to do here.
-			config_warnings_changed: async () => {},
+			config_warnings_changed: async () => { },
 			advisor_cost_changed: async () => {
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
@@ -392,12 +393,12 @@ export class EventController {
 				}
 				this.ctx.ui.requestRender(true);
 			},
-			goal_updated: async () => {},
+			goal_updated: async () => { },
 			// The TUI already refreshes the pending-messages bar at every queue
 			// mutation call site (`updatePendingMessagesDisplay()` in ui-helpers.ts);
 			// this event exists for RPC/ACP clients that have no equivalent local
 			// call site to hook, so there is nothing additional to do here.
-			queue_update: async () => {},
+			queue_update: async () => { },
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -1070,11 +1071,11 @@ export class EventController {
 				typeof event.message.content === "string"
 					? []
 					: event.message.content.filter(
-							(content): content is ImageContent =>
-								content.type === "image" &&
-								typeof content.data === "string" &&
-								typeof content.mimeType === "string",
-						);
+						(content): content is ImageContent =>
+							content.type === "image" &&
+							typeof content.data === "string" &&
+							typeof content.mimeType === "string",
+					);
 			const imageCount = imageBlocks.length;
 			const signature = `${userText}\u0000${imageCount}`;
 
@@ -1122,6 +1123,16 @@ export class EventController {
 				if (event.message.userInitiated) this.#turnStartedAt = event.message.timestamp;
 				else this.#turnStartedAt = undefined;
 				this.#turnUsage.reset();
+			}
+			// Harness notes frames (<notes-reference> / <notes-update-due>) are the
+			// one developer message kind that renders in the transcript: append them
+			// live (collapsed or inline per notes.collapseFrames, decided by
+			// addMessageToChat) exactly like user/fileMention content.
+			const frameText = textContent(event.message.content);
+			if (frameText && notesFrameKind(frameText)) {
+				this.#resetReadGroup();
+				this.ctx.addMessageToChat(event.message);
+				this.ctx.ui.requestRender();
 			}
 		} else if (event.message.role === "fileMention") {
 			this.#resetReadGroup();
@@ -1609,12 +1620,12 @@ export class EventController {
 			}
 			const displayMessage: AssistantMessage = silentlyAborted
 				? {
-						// Silence the streaming render by downgrading stopReason to "stop" for
-						// display only — does NOT mutate the persisted message's stopReason
-						// (the structural SilentAbort flag drives replay-side suppression).
-						...this.ctx.streamingMessage,
-						stopReason: "stop",
-					}
+					// Silence the streaming render by downgrading stopReason to "stop" for
+					// display only — does NOT mutate the persisted message's stopReason
+					// (the structural SilentAbort flag drives replay-side suppression).
+					...this.ctx.streamingMessage,
+					stopReason: "stop",
+				}
 				: this.ctx.streamingMessage;
 			const displayTimeline = splitAssistantMessageToolTimeline(displayMessage);
 			const linkTargets = await refreshAssistantMessageLinkTargets(this.ctx, [displayMessage]);
@@ -1957,8 +1968,8 @@ export class EventController {
 		const syntheticFailureDetails = event.result.details as { __synthetic?: boolean; source?: string } | undefined;
 		const syntheticFailureCard =
 			syntheticFailureDetails?.__synthetic === true &&
-			(syntheticFailureDetails.source === "assistant_stop_error" ||
-				syntheticFailureDetails.source === "assistant_stop_aborted")
+				(syntheticFailureDetails.source === "assistant_stop_error" ||
+					syntheticFailureDetails.source === "assistant_stop_aborted")
 				? this.ctx.pendingTools.get(event.toolCallId)
 				: undefined;
 		// A transient overlay (auto-compaction / auto-retry / handoff) that ran

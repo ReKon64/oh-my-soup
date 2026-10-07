@@ -44,7 +44,8 @@ import {
 } from "@oh-my-soup/pi-tui/chat/tool-execution";
 import { TranscriptBlock, TranscriptContainer } from "@oh-my-soup/pi-tui/chrome/transcript-container";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-soup/pi-tui/overlays/usage-row";
-import { UserMessageComponent } from "@oh-my-soup/pi-tui/chat/user-message";
+import { NotesFrameMessageComponent, notesFrameKind, UserMessageComponent } from "@oh-my-soup/pi-tui/chat/user-message";
+import { cfgNotesCollapseFrames } from "../../session/settings";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "@oh-my-soup/pi-tui/prompt/image-references";
 import { imageAttachmentSource } from "@oh-my-soup/pi-tui/prompt/image-source";
@@ -133,7 +134,7 @@ function imageLinksForMessage(
 }
 
 export class UiHelpers {
-	constructor(private ctx: InteractiveModeContext) {}
+	constructor(private ctx: InteractiveModeContext) { }
 
 	/**
 	 * Show a status message in the chat.
@@ -283,6 +284,34 @@ export class UiHelpers {
 			case "user":
 			case "developer": {
 				const userText = message.role === "user" ? textContent(message.content) : "";
+				if (message.role === "developer") {
+					// Harness notes frame (<notes-reference> snapshot / <notes-update-due>
+					// reminder): collapsed to one summary line when notes.collapseFrames is
+					// on (default), expanded via ctrl+o like tool output; setting off renders
+					// the full frame inline. Replay hits the same cached component. Only
+					// frame-tag-prefixed content takes this arm — other developer messages
+					// keep their pre-change (non-rendered) behavior.
+					const frameText = textContent(message.content);
+					if (frameText && notesFrameKind(frameText)) {
+						if (cfgNotesCollapseFrames.get(this.ctx.settings)) {
+							const cachedFrame = options?.reuseSettledComponent
+								? this.ctx.transcriptMessageComponents.get(message)
+								: undefined;
+							let frameComponent: NotesFrameMessageComponent;
+							if (cachedFrame instanceof NotesFrameMessageComponent) {
+								frameComponent = cachedFrame;
+							} else {
+								frameComponent = new NotesFrameMessageComponent(frameText);
+								this.ctx.transcriptMessageComponents.set(message, frameComponent);
+							}
+							frameComponent.setExpanded(this.ctx.toolOutputExpanded);
+							this.ctx.chatContainer.addChild(frameComponent);
+						} else {
+							this.ctx.chatContainer.addChild(new UserMessageComponent(frameText, { synthetic: true }));
+						}
+						break;
+					}
+				}
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					const cached = options?.reuseSettledComponent
@@ -320,10 +349,10 @@ export class UiHelpers {
 					cached instanceof AssistantMessageComponent
 						? cached
 						: createAssistantMessageComponent(
-								this.ctx,
-								splitAssistantMessageToolTimeline(message).beforeTools,
-								getAssistantMessageLinkTargets(this.ctx),
-							);
+							this.ctx,
+							splitAssistantMessageToolTimeline(message).beforeTools,
+							getAssistantMessageLinkTargets(this.ctx),
+						);
 				if (cached !== assistantComponent) {
 					this.ctx.transcriptMessageComponents.set(message, assistantComponent);
 				}
@@ -350,7 +379,7 @@ export class UiHelpers {
 	 */
 	renderSessionContext(sessionContext: SessionContext, options: RenderSessionContextOptions = {}): void {
 		const steps = this.#renderSessionContextSteps(sessionContext, options);
-		while (!steps.next().done) {}
+		while (!steps.next().done) { }
 	}
 
 	/** Build a session context in bounded chunks so terminal input runs between event-loop turns. */
@@ -609,10 +638,10 @@ export class UiHelpers {
 					const rawInput = content.customWireName !== undefined;
 					const renderArgs = partialJson
 						? decodeStreamedToolArgs(partialJson, {
-								rawInput,
-								fullArgs: content.arguments,
-								streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
-							})
+							rawInput,
+							fullArgs: content.arguments,
+							streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
+						})
 						: content.arguments;
 					const component = new ToolExecutionComponent(
 						renderToolName,
@@ -1210,8 +1239,7 @@ export class UiHelpers {
 			this.ctx.compactionQueuedMessages = queuedMessages;
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-					error instanceof Error ? error.message : String(error)
+				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${error instanceof Error ? error.message : String(error)
 				}`,
 			);
 		};

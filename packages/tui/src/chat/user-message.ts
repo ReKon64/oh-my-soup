@@ -144,7 +144,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		// Display-only collapse: the stored/wire text carries bracketed `[Image #N, WxH]` markers,
 		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
 		// Markdown layout so wrapping and bubble padding are computed on the visible text.
-		text = collapseImageMarkers(text, Number.POSITIVE_INFINITY, () => {});
+		text = collapseImageMarkers(text, Number.POSITIVE_INFINITY, () => { });
 		const mentionLabels: string[] = [];
 		MODEL_MENTION_TAG_RE.lastIndex = 0;
 		text = text.replace(MODEL_MENTION_TAG_RE, (_tag, _agent: string, name: string) => {
@@ -457,4 +457,158 @@ function syntheticInputLabel(text: string): string {
 		return heading ? heading[1]!.trim() || "Synthetic input" : "Synthetic input";
 	}
 	return "Synthetic input";
+}
+
+/** Kind of harness-injected notes frame a developer message carries. */
+export type NotesFrameKind = "reference" | "reminder";
+
+/**
+ * Recognize a harness notes frame: a developer message whose content is the
+ * wrapped `<notes-reference>` snapshot or the `<notes-update-due>` cadence
+ * reminder injected by the coding agent's important-notes machinery. Only
+ * frame-tag-prefixed content matches, so agent-authored prose that merely
+ * mentions the tags does not.
+ */
+export function notesFrameKind(text: string): NotesFrameKind | undefined {
+	if (text.startsWith("<notes-reference>")) return "reference";
+	if (text.startsWith("<notes-update-due>")) return "reminder";
+	return undefined;
+}
+
+/** Count JSON note objects inside a `<notes-reference>` frame body, if parseable. */
+function countNotesReferenceEntries(text: string): number | undefined {
+	const match = /\[[\s\S]*\]/.exec(text);
+	if (!match) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(match[0]);
+		if (!Array.isArray(parsed)) return undefined;
+		return parsed.length;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Extract the stale-turn count from a `<notes-update-due>` frame body, if present. */
+function countReminderTurns(text: string): number | undefined {
+	const match = /(\d+)\s+assistant turns/.exec(text);
+	return match ? Number.parseInt(match[1]!, 10) : undefined;
+}
+
+/** The most recently stamped note in a reference frame body, if parseable and stamped. */
+function freshestNoteEntry(text: string): { key: string; text: string } | undefined {
+	const match = /\[[\s\S]*\]/.exec(text);
+	if (!match) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(match[0]);
+		if (!Array.isArray(parsed)) return undefined;
+		let freshest: { key: string; text: string; updatedAt?: string } | undefined;
+		for (const entry of parsed) {
+			if (typeof entry !== "object" || entry === null) continue;
+			const note = entry as { key?: unknown; text?: unknown; updatedAt?: unknown };
+			if (typeof note.key !== "string" || typeof note.text !== "string") continue;
+			if (
+				freshest === undefined ||
+				(typeof note.updatedAt === "string" && note.updatedAt > (freshest.updatedAt ?? ""))
+			) {
+				freshest = { key: note.key, text: note.text, updatedAt: typeof note.updatedAt === "string" ? note.updatedAt : undefined };
+			}
+		}
+		if (freshest === undefined || freshest.updatedAt === undefined) return undefined;
+		return { key: freshest.key, text: freshest.text };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * One-line collapsed summary for a harness notes frame:
+ * `<label> · <count> · <expand hint>`. Counts are best-effort; the summary
+ * renders without them when the frame body is not parseable.
+ */
+export function notesFrameSummary(text: string): string {
+	const kind = notesFrameKind(text);
+	const dot = theme.sep.dot.trim();
+	const hint = expandKeyHint();
+	if (kind === "reminder") {
+		const turns = countReminderTurns(text);
+		const count = turns !== undefined ? `${dot} ${turns} turn${turns === 1 ? "" : "s"}` : "";
+		return `Notes update reminder ${count} ${dot} ${hint}`.replace(/\s+/g, " ").trim();
+	}
+	// A reference frame right after a save carries the freshest append (newest
+	// updatedAt): surface that note instead of a bare count, so the collapsed
+	// row shows what just changed.
+	const freshest = freshestNoteEntry(text);
+	if (freshest) {
+		const preview = freshest.text.length > 96 ? `${freshest.text.slice(0, 93)}...` : freshest.text;
+		return `${freshest.key} ${dot} ${preview} ${dot} ${hint}`.replace(/\s+/g, " ").trim();
+	}
+	const notes = countNotesReferenceEntries(text);
+	const count = notes !== undefined ? `${dot} ${notes} note${notes === 1 ? "" : "s"}` : "";
+	return `Session notes reference ${count} ${dot} ${hint}`.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Collapsed-by-default rendering for harness-injected session-notes frames
+ * (the `<notes-reference>` snapshot and `<notes-update-due>` cadence reminder
+ * persisted as developer messages). Collapsed, each frame costs a single dim
+ * summary row; the full multi-line frame is built lazily only when expanded
+ * via `ctrl+o`, mirroring {@link CollapsedSyntheticMessageComponent}.
+ */
+export class NotesFrameMessageComponent implements Component {
+	readonly #text: string;
+	#disclosure: Disclosure;
+	#expanded = false;
+	readonly #native = new Memo();
+
+	constructor(text: string) {
+		this.#text = text;
+		this.#disclosure = new Disclosure({
+			summary: new SyntheticSummary(notesFrameSummary(text)),
+			body: () => new UserMessageComponent(this.#text, { synthetic: true }),
+		});
+	}
+
+	/** ctrl+o toggle: reveal/hide the full frame. */
+	setExpanded(expanded: boolean): void {
+		this.#expanded = expanded;
+		this.#disclosure.setExpanded(expanded);
+	}
+
+	describe(): NativeNode {
+		const kind = notesFrameKind(this.#text);
+		return this.#native.get([this.#expanded], () =>
+			card(
+				{
+					role: "omp.user.synthetic",
+					tone: "muted",
+					head: [span(kind === "reminder" ? "Notes update reminder" : "Session notes reference", "dim")],
+					collapsible: true,
+					collapsed: !this.#expanded,
+				},
+				this.#expanded ? [md(this.#text)] : [],
+			),
+		);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	setIgnoreTight(ignore: boolean): this {
+		this.#disclosure.setIgnoreTight(ignore);
+		return this;
+	}
+
+	invalidate(): void {
+		this.#disclosure.invalidate();
+	}
+
+	dispose(): void {
+		this.#disclosure.dispose();
+	}
+
+	render(width: number): readonly string[] {
+		return this.#disclosure.render(width);
+	}
 }

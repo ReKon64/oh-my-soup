@@ -1447,6 +1447,18 @@ export const cfgNotesTimestamps = register({
 		description: "Show each note's last-update date in lists and injected context",
 	},
 });
+export const cfgNotesCollapseFrames = register({
+	id: "notes.collapseFrames",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "memory",
+		group: "Session Notes",
+		label: "Collapse notes frames",
+		description:
+			"Collapse the injected notes reference/reminder frames to a one-line summary in the transcript; Ctrl+O expands",
+	},
+});
 export const cfgNotesInjectAfterCompaction = register({
 	id: "notes.injectAfterCompaction",
 	type: "boolean",
