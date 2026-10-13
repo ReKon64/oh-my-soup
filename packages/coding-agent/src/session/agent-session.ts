@@ -6263,6 +6263,33 @@ export class AgentSession implements SettingsScope {
 			cached = { sessionFile, init: extractSessionInit(this.sessionManager.getEntries()) };
 			this.#sessionInit = cached;
 		}
+		if (!cached.init) {
+			// Fresh, forked, or pre-init transcripts have no persisted contract.
+			// Leaving it empty starves every downstream consumer that derives the
+			// subagent tool contract from `session_init` — notably forked
+			// sessions, whose journals never inherit the parent's init entry.
+			// Seed from live state; the dedupe below keeps it appended once.
+			const firstUser = this.sessionManager.getEntries().find(
+				entry =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					"content" in entry.message &&
+					typeof entry.message.content === "string",
+			);
+			const task =
+				firstUser?.type === "message" &&
+				firstUser.message.role === "user" &&
+				"content" in firstUser.message &&
+				typeof firstUser.message.content === "string"
+					? firstUser.message.content.slice(0, 2000)
+					: "";
+			cached.init = {
+				systemPrompt: this.#tools.baseOfSystemPrompt(prompt),
+				task,
+				tools: this.agent.state.tools.map(tool => tool.name),
+			};
+			this.sessionManager.appendSessionInit(cached.init);
+		}
 		const { init } = cached;
 		if (!init) return;
 		const base = this.#tools.baseOfSystemPrompt(prompt);

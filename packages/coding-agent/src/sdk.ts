@@ -4121,10 +4121,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (toolAllowlist) {
 			const unavailable = requestedToolNames.filter(name => !toolRegistry.has(name));
 			if (unavailable.length > 0) {
-				throw new Error(
-					`Unavailable authorized tool capabilities: ${unavailable.join(", ")}. ` +
-						"Retained eval-kernel tools require their original live parent kernel; they cannot be restored after process exit.",
-				);
+				// Inherited/retained sessions (forks, resumes) can authorize tools this
+				// child can never provide — `ask` needs an interactive channel, and
+				// retained eval-kernel tools die with their parent kernel. Throwing
+				// here made every subsequent spawn in such a session permanently
+				// impossible, so the child runs with the resolvable subset instead;
+				// capabilities only ever shrink, never escalate.
+				logger.warn("Dropping unavailable authorized tool capabilities from restricted session", {
+					unavailable,
+				});
 			}
 		}
 		const defaultInactiveToolNames = new Set(
